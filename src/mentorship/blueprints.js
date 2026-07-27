@@ -75,7 +75,7 @@ Rules:
 - Focus on validating what's on the resume, not testing advanced concepts
 - Ask ONE question at a time, 1-2 sentences
 - Base every question on information from their resume
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -116,7 +116,7 @@ Rules:
 - Focus on understanding how they learn and apply knowledge
 - Ask ONE question at a time, 1-2 sentences
 - Connect academic concepts to practical applications
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -157,7 +157,7 @@ Rules:
 - Focus on understanding their approach, not just the answer
 - Ask ONE question at a time, 1-2 sentences
 - Encourage them to think out loud
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -198,7 +198,7 @@ Rules:
 - Ask follow-up questions about technical details
 - Ask ONE question at a time, 1-2 sentences
 - Focus on THEIR decisions and reasoning
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -242,7 +242,7 @@ Rules:
 - Focus on professional growth and workplace skills
 - Ask ONE question at a time, 1-2 sentences
 - Explore how they adapted from academic to professional environment
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -282,7 +282,7 @@ Rules:
 - Present clear, well-defined problems
 - Focus on their problem-solving process, not just the solution
 - Ask ONE question at a time, 1-2 sentences
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -322,7 +322,7 @@ Rules:
 - Keep the scope manageable — this is basics level
 - Focus on their thought process and trade-offs
 - Ask ONE question at a time, 1-2 sentences
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -363,7 +363,7 @@ Rules:
 - Ask ONE question at a time, 1-2 sentences
 - Listen for STAR format (Situation, Task, Action, Result)
 - Probe for specific details and outcomes
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -407,7 +407,7 @@ Rules:
 - Push for depth and nuance in their answers
 - Ask ONE question at a time, 1-2 sentences
 - Challenge their understanding with follow-up probes
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -447,7 +447,7 @@ Rules:
 - Create realistic, challenging scenarios
 - Ask ONE question at a time, 1-2 sentences
 - Introduce complications to test adaptability
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -487,7 +487,7 @@ Rules:
 - Be genuine and conversational
 - Ask ONE question at a time, 1-2 sentences
 - Listen for authenticity and self-awareness
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -527,7 +527,7 @@ Rules:
 - Create realistic pressure scenarios
 - Ask ONE question at a time, 1-2 sentences
 - Observe how they manage stress in their responses
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -571,7 +571,7 @@ Rules:
 - Look for evidence of leadership, not just management
 - Ask ONE question at a time, 1-2 sentences
 - Focus on impact and outcomes
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -611,7 +611,7 @@ Rules:
 - Test multiple communication modalities
 - Ask ONE question at a time, 1-2 sentences
 - Pay attention to clarity, structure, and persuasiveness
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -651,7 +651,7 @@ Rules:
 - Present realistic ethical dilemmas
 - Ask ONE question at a time, 1-2 sentences
 - Listen for nuanced, thoughtful reasoning
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -691,7 +691,7 @@ Rules:
 - Present problems that require decomposition
 - Ask ONE question at a time, 1-2 sentences
 - Value structured, methodical thinking
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -731,7 +731,7 @@ Rules:
 - Focus on collaboration across functions
 - Ask ONE question at a time, 1-2 sentences
 - Look for empathy and communication across disciplines
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -771,7 +771,7 @@ Rules:
 - Focus on practical, modern industry practices
 - Ask ONE question at a time, 1-2 sentences
 - Assess breadth and depth of industry knowledge
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -815,7 +815,7 @@ Rules:
 - Create realistic negotiation scenarios
 - Ask ONE question at a time, 1-2 sentences
 - Look for strategic thinking and empathy
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -855,7 +855,7 @@ Rules:
 - Focus on growth mindset and helping others
 - Ask ONE question at a time, 1-2 sentences
 - Look for genuine passion for growth and teaching
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -895,7 +895,7 @@ Rules:
 - Present problems with business context and constraints
 - Ask ONE question at a time, 1-2 sentences
 - Value practical, implementable solutions
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -936,7 +936,7 @@ Rules:
 - Simulate a real interview experience
 - Ask ONE question at a time, 1-2 sentences
 - Mix technical and behavioral questions
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -980,7 +980,7 @@ Rules:
 - Be reflective and encouraging
 - Ask ONE question at a time, 1-2 sentences
 - Focus on growth and self-awareness
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [
@@ -1020,7 +1020,7 @@ Rules:
 - This is the culminating assessment
 - Ask ONE question at a time, 1-2 sentences
 - Be thorough but fair
-- This interview has exactly 5 questions
+- This interview has exactly 10 questions
 
 Return ONLY the question text:`,
     follow_up_guidelines: [

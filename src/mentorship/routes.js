@@ -1,11 +1,19 @@
 import { Router } from 'express';
+import multer from 'multer';
 import PDFDocument from 'pdfkit';
+import { v4 as uuidv4 } from 'uuid';
 import { journeyService } from './journeyService.js';
 import { requireAuth, requireRole } from '../aptitude/middleware/auth.js';
 import { asyncHandler } from '../utils/httpError.js';
 import { HttpError } from '../utils/httpError.js';
-import { InterviewReport, StudentJourney, User, Subscription, getSequelize } from '../database/index.js';
+import { InterviewReport, InterviewSession, JourneyInterview, StudentJourney, User, Subscription, getSequelize } from '../database/index.js';
 import { buildStudentWhere } from '../aptitude/utils/adminScope.js';
+import { extractTextFromPdf } from '../services/resumeParser.js';
+import { aiService } from '../services/aiService.js';
+import { getBlueprintByNumber } from './blueprints.js';
+import fs from 'fs/promises';
+
+const upload = multer({ dest: 'uploads/', limits: { fileSize: 5 * 1024 * 1024 } });
 
 const router = Router();
 
@@ -102,18 +110,101 @@ router.post('/subscribe', requireAuth, asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
-router.post('/interview/start', requireAuth, asyncHandler(async (req, res) => {
+router.post('/interview/start', requireAuth, upload.single('resume'), asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
   const info = getStudentInfo(req);
   const result = await journeyService.startInterview(studentId, info.name, info.email);
-  res.json(result);
+
+  let resumeText = '';
+  if (req.file) {
+    try {
+      const fileBuffer = await fs.readFile(req.file.path);
+      resumeText = await extractTextFromPdf(fileBuffer);
+    } catch (err) {
+      console.error('Failed to extract resume text:', err.message);
+    } finally {
+      try { await fs.unlink(req.file.path); } catch {}
+    }
+  }
+
+  const blueprint = getBlueprintByNumber(result.interview_number);
+  let firstQuestion = '';
+  if (blueprint && resumeText) {
+    try {
+      firstQuestion = await aiService.generateBlueprintFirstQuestion(resumeText, blueprint);
+    } catch (err) {
+      console.error('Failed to generate first blueprint question:', err.message);
+    }
+  }
+
+  await InterviewSession.create({
+    session_id: result.session_id,
+    student_id: studentId,
+    student_name: info.name || '',
+    student_email: info.email || '',
+    student_role: req.user?.role || 'student',
+    domain: blueprint?.domain || 'General',
+    role: blueprint?.role || 'Software Engineer',
+    resume_text: resumeText,
+    ats_analysis: null,
+    history: [],
+    current_question: firstQuestion,
+    question_count: 1,
+    status: 'active',
+  });
+
+  res.json({ ...result, question: firstQuestion, question_number: 1 });
 }));
 
-router.post('/interview/start/:interviewNumber', requireAuth, asyncHandler(async (req, res) => {
+router.post('/interview/start/:interviewNumber', requireAuth, upload.single('resume'), asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
   const interviewNumber = parseInt(req.params.interviewNumber);
   const result = await journeyService.startInterviewById(studentId, interviewNumber);
-  res.json(result);
+
+  let resumeText = '';
+  if (req.file) {
+    try {
+      const fileBuffer = await fs.readFile(req.file.path);
+      resumeText = await extractTextFromPdf(fileBuffer);
+    } catch (err) {
+      console.error('Failed to extract resume text:', err.message);
+    } finally {
+      try { await fs.unlink(req.file.path); } catch {}
+    }
+  }
+
+  const blueprint = getBlueprintByNumber(interviewNumber);
+  let firstQuestion = '';
+  if (blueprint && resumeText) {
+    try {
+      firstQuestion = await aiService.generateBlueprintFirstQuestion(resumeText, blueprint);
+    } catch (err) {
+      console.error('Failed to generate first blueprint question:', err.message);
+    }
+  }
+
+  const existingSession = await InterviewSession.findOne({ where: { session_id: result.session_id } });
+  if (!existingSession) {
+    await InterviewSession.create({
+      session_id: result.session_id,
+      student_id: studentId,
+      student_name: req.user?.name || '',
+      student_email: req.user?.email || '',
+      student_role: req.user?.role || 'student',
+      domain: blueprint?.domain || 'General',
+      role: blueprint?.role || 'Software Engineer',
+      resume_text: resumeText,
+      ats_analysis: null,
+      history: [],
+      current_question: firstQuestion,
+      question_count: 1,
+      status: 'active',
+    });
+  } else if (resumeText) {
+    await existingSession.update({ resume_text: resumeText, current_question: firstQuestion || existingSession.current_question });
+  }
+
+  res.json({ ...result, question: firstQuestion, question_number: 1 });
 }));
 
 router.get('/interview/blueprint/:sessionId', requireAuth, asyncHandler(async (req, res) => {
@@ -124,28 +215,145 @@ router.get('/interview/blueprint/:sessionId', requireAuth, asyncHandler(async (r
 
 router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
-  const { session_id, answer } = req.body || {};
-  if (!session_id || !answer) throw new HttpError(400, 'session_id and answer are required');
+  const { session_id: sessionId, answer } = req.body || {};
+  if (!sessionId || !answer) throw new HttpError(400, 'session_id and answer are required');
 
-  const existingReport = await InterviewReport.findOne({ where: { session_id } });
-  if (existingReport) {
-    await journeyService.completeInterview(studentId, session_id, existingReport.overall?.percentage || 0, existingReport.overall?.grade || '');
-    return res.json({ completed: true, report: existingReport });
+  const session = await InterviewSession.findOne({ where: { session_id: sessionId } });
+  if (!session) throw new HttpError(404, 'Session not found');
+  if (session.student_id !== studentId) throw new HttpError(403, 'Not your session');
+  if (session.status !== 'active') throw new HttpError(400, 'Interview already completed');
+
+  const journeyInt = await JourneyInterview.findOne({
+    where: { session_id: sessionId, student_id: studentId }
+  });
+  if (!journeyInt) throw new HttpError(404, 'Journey interview not found');
+
+  const blueprint = getBlueprintByNumber(journeyInt.interview_number);
+  if (!blueprint) throw new HttpError(500, 'Blueprint not found');
+
+  const evaluation = await aiService.evaluateBlueprintAnswer(session.current_question, answer, blueprint);
+
+  const historyEntry = {
+    question_number: session.question_count,
+    question: session.current_question,
+    answer,
+    evaluation,
+    timestamp: new Date(),
+  };
+  const updatedHistory = [...(session.history || []), historyEntry];
+  const maxQuestions = Number(process.env.MAX_QUESTIONS || 10);
+
+  if (session.question_count >= maxQuestions) {
+    await session.update({ history: updatedHistory, status: 'completed' });
+    return res.json({
+      completed: true,
+      feedback: evaluation.feedback || '',
+      metrics: Object.fromEntries(
+        ['confidence', 'body_language', 'knowledge', 'fluency', 'skill_relevance']
+          .map((k) => [k, evaluation[k] || 0])
+      ),
+      strengths: evaluation.strengths || [],
+      improvements: evaluation.improvements || [],
+      blueprint_score: evaluation.blueprint_score || 0,
+    });
   }
 
-  res.json({ completed: false, message: 'Use the existing interview engine to answer questions' });
+  const resumeText = session.resume_text || '';
+  const nextQuestion = await aiService.generateBlueprintNextQuestion(resumeText, updatedHistory, blueprint);
+
+  await session.update({
+    history: updatedHistory,
+    current_question: nextQuestion,
+    question_count: session.question_count + 1,
+  });
+
+  return res.json({
+    completed: false,
+    next_question: nextQuestion,
+    question_number: session.question_count + 1,
+    feedback: evaluation.feedback || '',
+    metrics: Object.fromEntries(
+      ['confidence', 'body_language', 'knowledge', 'fluency', 'skill_relevance']
+        .map((k) => [k, evaluation[k] || 0])
+    ),
+    strengths: evaluation.strengths || [],
+    improvements: evaluation.improvements || [],
+    blueprint_score: evaluation.blueprint_score || 0,
+  });
 }));
 
 router.post('/interview/end', requireAuth, asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
-  const { session_id } = req.body || {};
-  if (!session_id) throw new HttpError(400, 'session_id is required');
+  const { session_id: sessionId } = req.body || {};
+  if (!sessionId) throw new HttpError(400, 'session_id is required');
 
-  const report = await InterviewReport.findOne({ where: { session_id } });
-  if (!report) throw new HttpError(404, 'Report not found. Complete the interview first.');
+  const session = await InterviewSession.findOne({ where: { session_id: sessionId } });
+  if (!session) throw new HttpError(404, 'Session not found');
+  if (session.student_id !== studentId) throw new HttpError(403, 'Not your session');
 
-  const result = await journeyService.completeInterview(studentId, session_id, report.overall?.percentage || 0, report.overall?.grade || '');
-  res.json(result);
+  const existingReport = await InterviewReport.findOne({ where: { session_id: sessionId } });
+  if (existingReport) {
+    await journeyService.completeInterview(studentId, sessionId, existingReport.overall?.percentage || 0, existingReport.overall?.grade || '');
+    return res.json(existingReport);
+  }
+
+  const history = session.history || [];
+  if (!history.length) throw new HttpError(400, 'No answers recorded. Complete the interview first.');
+
+  const journeyInt = await JourneyInterview.findOne({
+    where: { session_id: sessionId, student_id: studentId }
+  });
+  const blueprint = journeyInt ? getBlueprintByNumber(journeyInt.interview_number) : null;
+
+  const avgBlueprintScore = history.reduce((sum, h) => sum + (h.evaluation?.blueprint_score || 0), 0) / history.length;
+  const avgMetrics = {};
+  for (const key of ['confidence', 'body_language', 'knowledge', 'fluency', 'skill_relevance']) {
+    avgMetrics[key] = history.reduce((sum, h) => sum + (h.evaluation?.[key] || 0), 0) / history.length;
+  }
+  const avgAll = Object.values(avgMetrics).reduce((s, v) => s + v, 0) / Object.keys(avgMetrics).length;
+  const pct = Math.round(avgAll * 10);
+
+  const reportData = {
+    session_id: sessionId,
+    student_id: studentId,
+    interview_role: blueprint?.role || session.role || '',
+    interview_domain: blueprint?.domain || session.domain || '',
+    blueprint_title: blueprint?.title || '',
+    blueprint_level: blueprint?.level || 0,
+    overall: {
+      percentage: pct,
+      grade: pct >= 80 ? 'A' : pct >= 60 ? 'B' : pct >= 40 ? 'C' : 'D',
+      grade_label: pct >= 80 ? 'Excellent' : pct >= 60 ? 'Good' : pct >= 40 ? 'Average' : 'Needs Improvement',
+      average_score: avgAll,
+      blueprint_avg: avgBlueprintScore,
+    },
+    metrics: avgMetrics,
+    question_breakdown: history.map((h) => ({
+      question: h.question,
+      answer: h.answer,
+      question_number: h.question_number,
+      scores: {
+        confidence: h.evaluation?.confidence || 0,
+        body_language: h.evaluation?.body_language || 0,
+        knowledge: h.evaluation?.knowledge || 0,
+        fluency: h.evaluation?.fluency || 0,
+        skill_relevance: h.evaluation?.skill_relevance || 0,
+      },
+      feedback: h.evaluation?.feedback || '',
+      strengths: h.evaluation?.strengths || [],
+      improvements: h.evaluation?.improvements || [],
+      blueprint_score: h.evaluation?.blueprint_score || 0,
+    })),
+    strengths: history.flatMap((h) => h.evaluation?.strengths || []).slice(0, 5),
+    improvements: history.flatMap((h) => h.evaluation?.improvements || []).slice(0, 5),
+    created_at: new Date(),
+  };
+
+  const report = await InterviewReport.create(reportData);
+  await session.update({ status: 'completed' });
+  await journeyService.completeInterview(studentId, sessionId, pct, reportData.overall.grade);
+
+  res.json(report);
 }));
 
 // ═══════════════════════════════════════════════════════
