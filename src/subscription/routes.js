@@ -2,8 +2,11 @@ import { Router } from 'express';
 import { requireAuth, requireRole } from '../aptitude/middleware/auth.js';
 import { asyncHandler, HttpError } from '../utils/httpError.js';
 import { getSequelize } from '../database/connection.js';
-import { Subscription, PaymentTransaction, StudentJourney, User, Plan } from '../database/index.js';
+import { Subscription, PaymentTransaction, StudentJourney, User, Plan, ReferralCampaign, IndividualStudent } from '../database/index.js';
 import { config } from '../config.js';
+import { validateReferralCode, applyReferralReward, computeReferralDiscount } from '../referral/service.js';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 
 const router = Router();
 
@@ -14,7 +17,6 @@ const PLANS = {
     access_level: 1,
     interviews_total: 4,
     amount: 199,
-    gst_rate: 0.18,
     features: ['Level 1 Journey Access', '4 AI Interviews', 'Resume Builder', 'Reports & Analytics'],
   },
   advanced: {
@@ -23,7 +25,6 @@ const PLANS = {
     access_level: 3,
     interviews_total: 12,
     amount: 499,
-    gst_rate: 0.18,
     features: ['Levels 1-3 Journey Access', '12 AI Interviews', 'Resume Builder', 'Reports & Analytics', 'Programming Practice', 'Communication Skills'],
   },
   professional: {
@@ -32,7 +33,6 @@ const PLANS = {
     access_level: 6,
     interviews_total: 24,
     amount: 849,
-    gst_rate: 0.18,
     features: ['All 6 Levels Journey Access', '24 AI Interviews', 'Resume Builder', 'Reports & Analytics', 'Programming Practice', 'Communication Skills', 'Certificates', 'Priority Support'],
   },
 };
@@ -61,19 +61,26 @@ router.get('/plans', requireAuth, asyncHandler(async (req, res) => {
     access_level: p.access_level,
     interviews_total: p.interviews_total,
     amount: p.amount,
-    gst_amount: Math.round(p.amount * p.gst_rate),
-    total_amount: p.amount + Math.round(p.amount * p.gst_rate),
+    total_amount: p.amount,
     features: p.features,
   }));
   res.json({ plans });
 }));
 
 router.post('/create-order', requireAuth, requireRole('individual_student'), asyncHandler(async (req, res) => {
-  const { plan_key } = req.body || {};
+  const { plan_key, referral_code } = req.body || {};
   if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
 
+  let discountInfo = null;
+  if (referral_code) {
+    const validation = await validateReferralCode(referral_code, req.user._id);
+    if (!validation.valid) throw new HttpError(400, validation.error);
+    discountInfo = computeReferralDiscount(validation.campaign, PLANS[plan_key].amount, plan_key);
+  }
+
   const plan = PLANS[plan_key];
-  const totalAmount = plan.amount + Math.round(plan.amount * plan.gst_rate);
+  const totalAmount = discountInfo ? discountInfo.finalAmount : plan.amount;
+  const discountAmount = discountInfo ? discountInfo.discount : 0;
 
   const razorpay = getRazorpayClient();
   if (!razorpay) {
@@ -81,6 +88,8 @@ router.post('/create-order', requireAuth, requireRole('individual_student'), asy
     return res.json({
       order_id: `mock_order_${Date.now()}`,
       amount: totalAmount,
+      original_amount: plan.amount,
+      discount: discountAmount,
       currency: 'INR',
       key_id: 'rzp_test_mock',
       mock: true,
@@ -110,6 +119,8 @@ router.post('/create-order', requireAuth, requireRole('individual_student'), asy
   res.json({
     order_id: order.id,
     amount: totalAmount,
+    original_amount: plan.amount,
+    discount: discountAmount,
     currency: 'INR',
     key_id: razorpay.key_id,
     mock: false,
@@ -117,12 +128,24 @@ router.post('/create-order', requireAuth, requireRole('individual_student'), asy
 }));
 
 router.post('/verify', requireAuth, requireRole('individual_student'), asyncHandler(async (req, res) => {
-  const { plan_key, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+  const { plan_key, razorpay_order_id, razorpay_payment_id, razorpay_signature, referral_code } = req.body || {};
   if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
 
   const plan = PLANS[plan_key];
   const studentId = req.user._id;
-  const totalAmount = plan.amount + Math.round(plan.amount * plan.gst_rate);
+
+  let discountAmount = 0;
+  let totalAmount = plan.amount;
+  let referralCampaign = null;
+  if (referral_code) {
+    const validation = await validateReferralCode(referral_code, studentId);
+    if (validation.valid) {
+      referralCampaign = validation.campaign;
+      const discountInfo = computeReferralDiscount(validation.campaign, plan.amount, plan_key);
+      discountAmount = discountInfo.discount;
+      totalAmount = discountInfo.finalAmount;
+    }
+  }
 
   const razorpay = getRazorpayClient();
   if (razorpay && razorpay_order_id && razorpay_payment_id && razorpay_signature) {
@@ -136,7 +159,6 @@ router.post('/verify', requireAuth, requireRole('individual_student'), asyncHand
   }
 
   const invoiceNumber = generateInvoiceNumber();
-  const gstAmount = Math.round(plan.amount * plan.gst_rate);
 
   const planRecord = await Plan.findOne({ where: { plan_key: plan.key } });
 
@@ -150,16 +172,17 @@ router.post('/verify', requireAuth, requireRole('individual_student'), asyncHand
     status: 'active',
     razorpay_order_id: razorpay_order_id || null,
     razorpay_payment_id: razorpay_payment_id || null,
-    amount_paid: plan.amount,
+    amount_paid: totalAmount,
     currency: 'INR',
-    gst_amount: gstAmount,
+    gst_amount: 0,
     start_date: new Date(),
     end_date: null,
     invoices: [{
       number: invoiceNumber,
       date: new Date().toISOString(),
       amount: plan.amount,
-      gst: gstAmount,
+      discount: discountAmount,
+      gst: 0,
       total: totalAmount,
     }],
   });
@@ -167,9 +190,9 @@ router.post('/verify', requireAuth, requireRole('individual_student'), asyncHand
   const transaction = await PaymentTransaction.create({
     student_id: studentId,
     subscription_id: subscription._id,
-    amount: plan.amount,
+    amount: totalAmount,
     currency: 'INR',
-    gst_amount: gstAmount,
+    gst_amount: 0,
     total_amount: totalAmount,
     payment_method: 'razorpay',
     payment_id: razorpay_payment_id || null,
@@ -178,7 +201,7 @@ router.post('/verify', requireAuth, requireRole('individual_student'), asyncHand
     invoice_number: invoiceNumber,
     invoice_date: new Date(),
     invoice_items: [
-      { description: `${plan.name} Plan - Journey Access`, amount: plan.amount, gst: gstAmount, total: totalAmount },
+      { description: `${plan.name} Plan - Journey Access`, amount: plan.amount, discount: discountAmount, gst: 0, total: totalAmount },
     ],
     plan_key: plan.key,
     plan_name: plan.name,
@@ -200,6 +223,15 @@ router.post('/verify', requireAuth, requireRole('individual_student'), asyncHand
     await existingJourney.update({ journey_access_level: plan.access_level });
   }
 
+  let referral_result = null;
+  if (referral_code && referralCampaign) {
+    try {
+      referral_result = await applyReferralReward(referralCampaign._id, referralCampaign.owner_user_id, studentId, subscription._id);
+    } catch (_err) {
+      // Referral reward failure should not block the subscription
+    }
+  }
+
   res.json({
     success: true,
     subscription: {
@@ -210,10 +242,11 @@ router.post('/verify', requireAuth, requireRole('individual_student'), asyncHand
       interviews_total: subscription.interviews_total,
       status: subscription.status,
       amount_paid: subscription.amount_paid,
-      gst_amount: subscription.gst_amount,
+      gst_amount: 0,
     },
-    invoice: { number: invoiceNumber, amount: plan.amount, gst: gstAmount, total: totalAmount },
+    invoice: { number: invoiceNumber, amount: plan.amount, discount: discountAmount, gst: 0, total: totalAmount },
     transaction_id: transaction._id,
+    referral_applied: referral_result?.applied || false,
   });
 }));
 
@@ -276,14 +309,14 @@ router.post(
       razorpay_payment_id: razorpay_payment_id || null,
       amount_paid: preview.final_price,
       currency: 'INR',
-      gst_amount: preview.gst_amount,
+      gst_amount: 0,
       start_date: new Date(),
       end_date: null,
       invoices: [{
         number: invoiceNumber,
         date: new Date().toISOString(),
         amount: preview.final_price,
-        gst: preview.gst_amount,
+        gst: 0,
         total: preview.total_amount,
       }],
     });
@@ -293,7 +326,7 @@ router.post(
       subscription_id: newSub._id,
       amount: preview.final_price,
       currency: 'INR',
-      gst_amount: preview.gst_amount,
+      gst_amount: 0,
       total_amount: preview.total_amount,
       payment_method: 'razorpay',
       payment_id: razorpay_payment_id || null,
@@ -304,7 +337,7 @@ router.post(
       invoice_items: [{
         description: `Level Upgrade: ${levelName}${preview.has_discount ? ' (25% bulk discount applied)' : ''}`,
         amount: preview.final_price,
-        gst: preview.gst_amount,
+        gst: 0,
         total: preview.total_amount,
       }],
       plan_key: `level_upgrade_${targetLevel}`,
@@ -337,9 +370,9 @@ router.post(
         interviews_total: newSub.interviews_total,
         status: newSub.status,
         amount_paid: newSub.amount_paid,
-        gst_amount: newSub.gst_amount,
-      },
-      invoice: { number: invoiceNumber, amount: preview.final_price, gst: preview.gst_amount, total: preview.total_amount },
+      gst_amount: 0,
+    },
+    invoice: { number: invoiceNumber, amount: preview.final_price, gst: 0, total: preview.total_amount },
     });
   }),
 );
@@ -365,7 +398,6 @@ router.get('/current', requireAuth, requireRole('individual_student'), asyncHand
       interviews_total: subscription.interviews_total,
       status: subscription.status,
       amount_paid: subscription.amount_paid,
-      gst_amount: subscription.gst_amount,
       start_date: subscription.start_date,
       end_date: subscription.end_date,
       created_at: subscription.created_at,
@@ -389,7 +421,6 @@ router.get('/history', requireAuth, requireRole('individual_student'), asyncHand
     transactions: transactions.map(t => ({
       id: t._id,
       amount: t.amount,
-      gst_amount: t.gst_amount,
       total_amount: t.total_amount,
       status: t.status,
       invoice_number: t.invoice_number,
@@ -419,7 +450,6 @@ router.get('/invoice/:transactionId', requireAuth, requireRole('individual_stude
       },
       items: transaction.invoice_items,
       subtotal: transaction.amount,
-      gst: transaction.gst_amount,
       total: transaction.total_amount,
       payment_method: transaction.payment_method,
       payment_id: transaction.payment_id,
@@ -431,17 +461,15 @@ router.get('/invoice/:transactionId', requireAuth, requireRole('individual_stude
 const LEVEL_PRICE = 199;
 const BULK_DISCOUNT_LEVELS = 2;
 const BULK_DISCOUNT_RATE = 0.25;
-const GST_RATE = 0.18;
 
-function calculateLevelUpgrade(currentLevel, targetLevel, gstRate = GST_RATE) {
+function calculateLevelUpgrade(currentLevel, targetLevel) {
   if (targetLevel <= currentLevel) return null;
   const levelsCount = targetLevel - currentLevel;
   const basePrice = levelsCount * LEVEL_PRICE;
   const hasDiscount = levelsCount >= BULK_DISCOUNT_LEVELS;
   const discountAmount = hasDiscount ? Math.round(basePrice * BULK_DISCOUNT_RATE) : 0;
   const finalPrice = basePrice - discountAmount;
-  const gstAmount = Math.round(finalPrice * gstRate);
-  const totalAmount = finalPrice + gstAmount;
+  const totalAmount = finalPrice;
   return {
     levels_count: levelsCount,
     current_level: currentLevel,
@@ -452,7 +480,7 @@ function calculateLevelUpgrade(currentLevel, targetLevel, gstRate = GST_RATE) {
     discount_percentage: hasDiscount ? 25 : 0,
     discount_amount: discountAmount,
     final_price: finalPrice,
-    gst_amount: gstAmount,
+    gst_amount: 0,
     total_amount: totalAmount,
   };
 }
@@ -581,14 +609,14 @@ router.post('/upgrade-level', requireAuth, requireRole('individual_student'), as
     razorpay_payment_id: razorpay_payment_id || null,
     amount_paid: preview.final_price,
     currency: 'INR',
-    gst_amount: preview.gst_amount,
+    gst_amount: 0,
     start_date: new Date(),
     end_date: null,
     invoices: [{
       number: invoiceNumber,
       date: new Date().toISOString(),
       amount: preview.final_price,
-      gst: preview.gst_amount,
+      gst: 0,
       total: preview.total_amount,
     }],
   });
@@ -598,7 +626,7 @@ router.post('/upgrade-level', requireAuth, requireRole('individual_student'), as
     subscription_id: newSub._id,
     amount: preview.final_price,
     currency: 'INR',
-    gst_amount: preview.gst_amount,
+    gst_amount: 0,
     total_amount: preview.total_amount,
     payment_method: 'razorpay',
     payment_id: razorpay_payment_id || null,
@@ -610,7 +638,7 @@ router.post('/upgrade-level', requireAuth, requireRole('individual_student'), as
       {
         description: `Level Upgrade: ${levelName}${preview.has_discount ? ` (25% bulk discount applied)` : ''}`,
         amount: preview.final_price,
-        gst: preview.gst_amount,
+        gst: 0,
         total: preview.total_amount,
       },
     ],
@@ -644,9 +672,9 @@ router.post('/upgrade-level', requireAuth, requireRole('individual_student'), as
       interviews_total: newSub.interviews_total,
       status: newSub.status,
       amount_paid: newSub.amount_paid,
-      gst_amount: newSub.gst_amount,
+      gst_amount: 0,
     },
-    invoice: { number: invoiceNumber, amount: preview.final_price, gst: preview.gst_amount, total: preview.total_amount },
+    invoice: { number: invoiceNumber, amount: preview.final_price, gst: 0, total: preview.total_amount },
     upgrade: preview,
   });
 }));
@@ -773,8 +801,6 @@ router.patch('/admin/individual-students/:studentId/subscription', requireAuth, 
       await currentSub.update({ status: 'upgraded' });
     }
 
-    const gstAmount = Math.round(plan.amount * plan.gst_rate);
-    const totalAmount = plan.amount + gstAmount;
     const invoiceNumber = generateInvoiceNumber();
 
     const newSub = await Subscription.create({
@@ -785,21 +811,21 @@ router.patch('/admin/individual-students/:studentId/subscription', requireAuth, 
       interviews_total: plan.interviews_total,
       status: 'active',
       amount_paid: plan.amount,
-      gst_amount: gstAmount,
+      gst_amount: 0,
       start_date: new Date(),
-      invoices: [{ number: invoiceNumber, date: new Date().toISOString(), amount: plan.amount, gst: gstAmount, total: totalAmount }],
+      invoices: [{ number: invoiceNumber, date: new Date().toISOString(), amount: plan.amount, gst: 0, total: plan.amount }],
     });
 
     await PaymentTransaction.create({
       student_id: studentId,
       subscription_id: newSub._id,
       amount: plan.amount,
-      gst_amount: gstAmount,
-      total_amount: totalAmount,
+      gst_amount: 0,
+      total_amount: plan.amount,
       status: 'completed',
       invoice_number: invoiceNumber,
       invoice_date: new Date(),
-      invoice_items: [{ description: `${plan.name} Plan - Journey Access (Admin Assigned)`, amount: plan.amount, gst: gstAmount, total: totalAmount }],
+      invoice_items: [{ description: `${plan.name} Plan - Journey Access (Admin Assigned)`, amount: plan.amount, gst: 0, total: plan.amount }],
       plan_key: plan.key,
       plan_name: plan.name,
     });
@@ -830,6 +856,222 @@ router.patch('/admin/individual-students/:studentId/subscription', requireAuth, 
   }
 
   throw new HttpError(400, 'Invalid action. Use: upgrade, assign, or cancel');
+}));
+
+function signToken(user) {
+  return jwt.sign({ sub: user._id, role: user.role }, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  });
+}
+
+function toSafeJSON(user) {
+  return {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    phone: user.phone || null,
+    is_active: user.is_active,
+    email_verified: user.email_verified,
+  };
+}
+
+router.post('/guest-create-order', asyncHandler(async (req, res) => {
+  const { plan_key, referral_code } = req.body || {};
+  if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
+
+  let discountInfo = null;
+  if (referral_code) {
+    const validation = await validateReferralCode(referral_code, null);
+    if (validation.valid) {
+      discountInfo = computeReferralDiscount(validation.campaign, PLANS[plan_key].amount, plan_key);
+    }
+  }
+
+  const plan = PLANS[plan_key];
+  const totalAmount = discountInfo ? discountInfo.finalAmount : plan.amount;
+  const discountAmount = discountInfo ? discountInfo.discount : 0;
+
+  const razorpay = getRazorpayClient();
+  if (!razorpay) {
+    if (config.isProduction) throw new HttpError(500, 'Payment gateway not configured');
+    return res.json({
+      order_id: `mock_order_${Date.now()}`,
+      amount: totalAmount,
+      original_amount: plan.amount,
+      discount: discountAmount,
+      currency: 'INR',
+      key_id: 'rzp_test_mock',
+      mock: true,
+    });
+  }
+
+  const auth = Buffer.from(`${razorpay.key_id}:${razorpay.key_secret}`).toString('base64');
+  const response = await fetch('https://api.razorpay.com/v1/orders', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${auth}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      amount: totalAmount * 100,
+      currency: 'INR',
+      receipt: `rcpt_guest_${plan_key}_${Date.now().toString(36)}`,
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json();
+    throw new HttpError(500, err.error?.description || 'Failed to create payment order');
+  }
+
+  const order = await response.json();
+  res.json({
+    order_id: order.id,
+    amount: totalAmount,
+    original_amount: plan.amount,
+    discount: discountAmount,
+    currency: 'INR',
+    key_id: razorpay.key_id,
+    mock: false,
+  });
+}));
+
+router.post('/guest-verify', asyncHandler(async (req, res) => {
+  const { plan_key, name, email, password, razorpay_order_id, razorpay_payment_id, razorpay_signature, referral_code } = req.body || {};
+  if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
+  if (!name || !email || !password) throw new HttpError(400, 'Name, email, and password are required');
+
+  const plan = PLANS[plan_key];
+
+  const razorpay = getRazorpayClient();
+  if (razorpay && razorpay_order_id && razorpay_payment_id && razorpay_signature) {
+    const crypto = await import('node:crypto');
+    const expectedSig = crypto.createHmac('sha256', razorpay.key_secret)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest('hex');
+    if (expectedSig !== razorpay_signature) {
+      throw new HttpError(400, 'Payment verification failed');
+    }
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const existing = await User.findOne({ where: { email: normalizedEmail } });
+  if (existing) throw new HttpError(400, 'Email is already registered');
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const user = await User.create({
+    name: name.trim(),
+    email: normalizedEmail,
+    password_hash: passwordHash,
+    role: 'individual_student',
+    email_verified: true,
+    must_change_password: false,
+    is_active: true,
+  });
+
+  await getSequelize().query(
+    `INSERT INTO individual_students (_id, user_id, subscription_status, created_at, updated_at)
+     VALUES (gen_random_uuid(), :userId, 'inactive', NOW(), NOW())`,
+    { replacements: { userId: user._id } }
+  );
+
+  let discountAmount = 0;
+  let totalAmount = plan.amount;
+  let referralCampaign = null;
+  if (referral_code) {
+    const validation = await validateReferralCode(referral_code, user._id);
+    if (validation.valid) {
+      referralCampaign = validation.campaign;
+      const discountInfo = computeReferralDiscount(validation.campaign, plan.amount, plan_key);
+      discountAmount = discountInfo.discount;
+      totalAmount = discountInfo.finalAmount;
+    }
+  }
+
+  const invoiceNumber = generateInvoiceNumber();
+  const planRecord = await Plan.findOne({ where: { plan_key: plan.key } });
+
+  const subscription = await Subscription.create({
+    student_id: user._id,
+    plan_key: plan.key,
+    plan_name: plan.name,
+    plan_id: planRecord?._id || null,
+    access_level: plan.access_level,
+    interviews_total: plan.interviews_total,
+    status: 'active',
+    razorpay_order_id: razorpay_order_id || null,
+    razorpay_payment_id: razorpay_payment_id || null,
+    amount_paid: totalAmount,
+    currency: 'INR',
+    gst_amount: 0,
+    start_date: new Date(),
+    end_date: null,
+    invoices: [{
+      number: invoiceNumber,
+      date: new Date().toISOString(),
+      amount: plan.amount,
+      discount: discountAmount,
+      gst: 0,
+      total: totalAmount,
+    }],
+  });
+
+  await PaymentTransaction.create({
+    student_id: user._id,
+    subscription_id: subscription._id,
+    amount: totalAmount,
+    currency: 'INR',
+    gst_amount: 0,
+    total_amount: totalAmount,
+    payment_method: 'razorpay',
+    payment_id: razorpay_payment_id || null,
+    order_id: razorpay_order_id || null,
+    status: 'completed',
+    invoice_number: invoiceNumber,
+    invoice_date: new Date(),
+    invoice_items: [
+      { description: `${plan.name} Plan - Journey Access`, amount: plan.amount, discount: discountAmount, gst: 0, total: totalAmount },
+    ],
+    plan_key: plan.key,
+    plan_name: plan.name,
+  });
+
+  await StudentJourney.create({
+    student_id: user._id,
+    student_name: user.name || '',
+    student_email: user.email || '',
+    institution_id: null,
+    journey_access_level: plan.access_level,
+    current_level: 1,
+    status: 'not_started',
+  });
+
+  let referral_result = null;
+  if (referralCampaign) {
+    try {
+      referral_result = await applyReferralReward(referralCampaign._id, referralCampaign.owner_user_id, user._id, subscription._id);
+    } catch (_err) {}
+  }
+
+  const token = signToken(user);
+
+  res.status(201).json({
+    success: true,
+    user: toSafeJSON(user),
+    token,
+    subscription: {
+      id: subscription._id,
+      plan_key: subscription.plan_key,
+      plan_name: subscription.plan_name,
+      access_level: subscription.access_level,
+      interviews_total: subscription.interviews_total,
+      status: subscription.status,
+      amount_paid: subscription.amount_paid,
+    },
+    invoice: { number: invoiceNumber, amount: plan.amount, discount: discountAmount, gst: 0, total: totalAmount },
+    referral_applied: referral_result?.applied || false,
+  });
 }));
 
 export default router;

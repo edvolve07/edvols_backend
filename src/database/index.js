@@ -44,5 +44,7 @@ export { AssessmentAssignment } from './models/AssessmentAssignment.js';
 export { AssessmentDepartment } from './models/AssessmentDepartment.js';
 export { InstitutionModule } from './models/InstitutionModule.js';
 export { HelpRequest } from './models/HelpRequest.js';
+export { ReferralCampaign } from './models/ReferralCampaign.js';
+export { ReferralHistory } from './models/ReferralHistory.js';
 
 export const Op = Sequelize.Op;

@@ -45,6 +45,10 @@ export const Institution = sequelize.define('Institution', {
     type: DataTypes.STRING(20),
     defaultValue: 'active',
   },
+  interview_gap_days: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
+  },
   created_by: {
     type: DataTypes.UUID,
     allowNull: false,

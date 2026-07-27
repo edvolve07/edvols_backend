@@ -13,7 +13,7 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'replace_with_a_long_r
     process.exit(1);
   }
   const generated = crypto.randomBytes(64).toString('hex');
-  console.error(`[SECURITY] JWT_SECRET is weak or missing. Generated temporary secret: ${generated}`);
+  console.error('[SECURITY] JWT_SECRET is weak or missing. A temporary secret has been generated.');
   console.error('[SECURITY] Set JWT_SECRET in your .env file to a long random string (min 32 chars).');
   process.env.JWT_SECRET = generated;
 }
@@ -39,8 +39,7 @@ const clientUrls = (process.env.CLIENT_URL || '').split(',').map(s => s.trim()).
 export const ALLOWED_ORIGINS = [
   'https://app.edvols.in',
   ...clientUrls,
-  'http://localhost:5173',
-  'http://localhost:4173',
+  ...(process.env.NODE_ENV !== 'production' ? ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:4173'] : []),
 ].filter(Boolean);
 
 

@@ -110,7 +110,14 @@ router.get(
       },
       problems: problems.map((p) => ({
         id: p._id.toString(),
-        ...p,
+        title: p.title,
+        difficulty: p.difficulty,
+        concept: p.concept,
+        status: p.status,
+        tags: p.tags,
+        sample_test_cases: p.sample_test_cases,
+        visible_test_cases: p.visible_test_cases,
+        created_at: p.created_at,
       })),
     });
   }),
@@ -236,7 +243,7 @@ router.get(
 
     const userIds = [...new Set(attempts.map((a) => a.student_id).filter(Boolean))];
     const users = userIds.length > 0
-      ? await Student.findAll({
+      ? await User.findAll({
           where: { _id: { [Op.in]: userIds } },
           attributes: ['_id', 'name', 'email'],
         })
@@ -290,7 +297,7 @@ router.get(
 
     const studentIds = [...new Set(attempts.map((a) => a.student_id).filter(Boolean))];
     const users = studentIds.length > 0
-      ? await Student.findAll({
+      ? await User.findAll({
           where: { _id: { [Op.in]: studentIds } },
           attributes: ['_id', 'name', 'email'],
         })

@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { JourneyBlueprint, StudentJourney, JourneyInterview, InterviewSession, InterviewReport, User, ResumeVersion } from '../database/index.js';
+import { JourneyBlueprint, StudentJourney, JourneyInterview, InterviewSession, InterviewReport, User, ResumeVersion, Subscription, Plan, Institution } from '../database/index.js';
 import { LEVELS, BLUEPRINTS, getLevelForInterview, getBlueprintByNumber, isInterviewAccessible, getNextLockedInterview } from './blueprints.js';
 import { getSequelize, Op } from '../database/index.js';
 import { buildStudentWhere } from '../aptitude/utils/adminScope.js';
@@ -125,6 +125,19 @@ export class JourneyService {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
     if (!journey) throw new Error('No journey found. Contact your administrator to assign journey access.');
 
+    if (journey.institution_id) {
+      const institution = await Institution.findByPk(journey.institution_id);
+      const gapDays = institution?.interview_gap_days || 0;
+      if (gapDays > 0 && journey.last_interview_at) {
+        const elapsedMs = Date.now() - new Date(journey.last_interview_at).getTime();
+        const gapMs = gapDays * 24 * 60 * 60 * 1000;
+        if (elapsedMs < gapMs) {
+          const remainingDays = Math.ceil((gapMs - elapsedMs) / (24 * 60 * 60 * 1000));
+          throw new Error(`You must wait ${remainingDays} more day(s) before starting the next interview.`);
+        }
+      }
+    }
+
     const nextInterview = await this.getAvailableInterview(studentId);
     if (!nextInterview) throw new Error('No available interviews. All accessible interviews are completed or locked.');
 
@@ -180,6 +193,19 @@ export class JourneyService {
   async startInterviewById(studentId, interviewNumber) {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
     if (!journey) throw new Error('No journey found.');
+
+    if (journey.institution_id) {
+      const institution = await Institution.findByPk(journey.institution_id);
+      const gapDays = institution?.interview_gap_days || 0;
+      if (gapDays > 0 && journey.last_interview_at) {
+        const elapsedMs = Date.now() - new Date(journey.last_interview_at).getTime();
+        const gapMs = gapDays * 24 * 60 * 60 * 1000;
+        if (elapsedMs < gapMs) {
+          const remainingDays = Math.ceil((gapMs - elapsedMs) / (24 * 60 * 60 * 1000));
+          throw new Error(`You must wait ${remainingDays} more day(s) before starting the next interview.`);
+        }
+      }
+    }
 
     const blueprint = getBlueprintByNumber(interviewNumber);
     if (!blueprint) throw new Error('Invalid interview number: ' + interviewNumber);
@@ -496,16 +522,34 @@ export class JourneyService {
     const maxInterviews = this._getMaxInterviewsForAccess(journey.journey_access_level);
     const completed = journey.completed_interviews;
 
+    let gapDays = 0;
+    let gapRemainingDays = 0;
+    if (journey.institution_id) {
+      const institution = await Institution.findByPk(journey.institution_id);
+      gapDays = institution?.interview_gap_days || 0;
+      if (gapDays > 0 && journey.last_interview_at) {
+        const elapsedMs = Date.now() - new Date(journey.last_interview_at).getTime();
+        const gapMs = gapDays * 24 * 60 * 60 * 1000;
+        if (elapsedMs < gapMs) {
+          gapRemainingDays = Math.ceil((gapMs - elapsedMs) / (24 * 60 * 60 * 1000));
+        }
+      }
+    }
+
+    const atLimit = completed >= maxInterviews;
+    const inGap = gapRemainingDays > 0;
+
     return {
-      allowed: completed < maxInterviews,
+      allowed: !atLimit && !inGap,
       interviewsUsed: completed,
       interviewsTotal: maxInterviews,
       remaining: Math.max(0, maxInterviews - completed),
       nextUnlockAt: null,
       daysRemaining: 0,
       lastInterviewAt: journey.last_interview_at,
-      gapDays: 0,
-      reason: completed >= maxInterviews ? 'level_limit' : null,
+      gapDays,
+      gapRemainingDays,
+      reason: atLimit ? 'level_limit' : inGap ? 'gap_restriction' : null,
     };
   }
 
@@ -750,14 +794,44 @@ export class JourneyService {
   }
 
   async assignSubscription(studentId, planKey) {
-    const levelMatch = planKey.match(/level_1_(\d+)/);
-    if (!levelMatch) throw new Error('Invalid plan key');
-    const level = parseInt(levelMatch[1]);
-    return this.assignJourneyAccess(studentId, level, 'admin');
+    const level = this._levelFromPlanKey(planKey);
+    await this.assignJourneyAccess(studentId, level, 'admin');
+    const planInfo = await Plan.findOne({ where: { plan_key: planKey } });
+    const PLAN_DETAILS = {
+      basic: { name: 'Basic', price: 499, interviews: 4 },
+      advanced: { name: 'Advanced', price: 1199, interviews: 12 },
+      professional: { name: 'Professional', price: 1999, interviews: 24 },
+    };
+    const fallback = PLAN_DETAILS[planKey] || { name: planKey, price: 0, interviews: 0 };
+    await Subscription.create({
+      student_id: studentId,
+      plan_key: planKey,
+      plan_name: planInfo?.plan_name || fallback.name,
+      plan_id: planInfo?._id || null,
+      access_level: planInfo?.journey_access || level,
+      interviews_total: planInfo?.total_interviews || fallback.interviews,
+      status: 'active',
+      amount_paid: planInfo?.price || fallback.price,
+      currency: 'INR',
+      gst_amount: 0,
+      start_date: new Date(),
+      end_date: null,
+      invoices: [],
+    });
+    return { success: true, student_id: studentId, plan_key: planKey, access_level: level };
   }
 
   async bulkAssignSubscription(studentIds, planKey) {
-    return this.bulkAssignAccess(studentIds, this._levelFromPlanKey(planKey), 'admin');
+    const results = [];
+    for (const studentId of studentIds) {
+      try {
+        await this.assignSubscription(studentId, planKey);
+        results.push({ student_id: studentId, success: true });
+      } catch (err) {
+        results.push({ student_id: studentId, success: false, error: err.message });
+      }
+    }
+    return results;
   }
 
   async extendSubscription(subscriptionId, days) {
@@ -769,24 +843,29 @@ export class JourneyService {
   }
 
   async getSubscriptionImpact(institutionId, planKey) {
-    const students = await StudentJourney.findAll({
-      where: { institution_id: institutionId },
+    const students = await User.findAll({
+      where: { institutionId, role: 'student' },
     });
+    const affectedIds = students.map(s => s._id);
+    const withJourney = affectedIds.length
+      ? await StudentJourney.count({ where: { student_id: { [Op.in]: affectedIds } } })
+      : 0;
     return {
       total_affected: students.length,
+      with_journey: withJourney,
       institution_id: institutionId,
       plan_key: planKey,
     };
   }
 
   async assignInstitutionSubscription(institutionId, planKey) {
-    const students = await User.findAll({ where: { institutionId } });
+    const students = await User.findAll({ where: { institutionId, role: 'student' } });
     const studentIds = students.map(s => s._id);
-    return this.bulkAssignAccess(studentIds, this._levelFromPlanKey(planKey), 'admin');
+    return this.bulkAssignSubscription(studentIds, planKey);
   }
 
   async assignInstitutionJourneyAccess(institutionId, accessLevel, assignedBy, filters = {}) {
-    const where = { institutionId };
+    const where = { institutionId, role: 'student' };
     if (filters.department_id) where.department_id = filters.department_id;
     if (filters.year) where.year = filters.year;
     const students = await User.findAll({ where });
@@ -795,7 +874,7 @@ export class JourneyService {
   }
 
   async getJourneyAccessImpact(institutionId, filters = {}) {
-    const studentWhere = { institutionId };
+    const studentWhere = { institutionId, role: 'student' };
     if (filters.department_id) studentWhere.department_id = filters.department_id;
     if (filters.year) studentWhere.year = filters.year;
     const totalStudents = await User.count({ where: studentWhere });
@@ -811,7 +890,9 @@ export class JourneyService {
 
   _levelFromPlanKey(planKey) {
     const match = planKey.match(/level_1_(\d+)/);
-    return match ? parseInt(match[1]) : 1;
+    if (match) return parseInt(match[1]);
+    const PLAN_LEVEL_MAP = { basic: 1, advanced: 3, professional: 6 };
+    return PLAN_LEVEL_MAP[planKey] || 1;
   }
 
   async getAdminDepartments() {

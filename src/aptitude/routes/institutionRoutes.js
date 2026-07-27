@@ -43,6 +43,7 @@ function serializeInstitution(inst) {
     address: inst.address || '',
     modules: inst.modules || { aptitude: true, coding: true, interviews: true, resumeBuilder: false, certificates: true },
     status: inst.status,
+    interview_gap_days: inst.interview_gap_days || 0,
     created_by: inst.created_by || null,
     created_at: inst.created_at,
     updated_at: inst.updated_at,
@@ -191,6 +192,7 @@ router.patch(
     const phone = req.body.phone !== undefined ? String(req.body.phone).trim() : undefined;
     const address = req.body.address !== undefined ? String(req.body.address).trim() : undefined;
     const status = req.body.status !== undefined ? String(req.body.status).toLowerCase() : undefined;
+    const interview_gap_days = req.body.interview_gap_days !== undefined ? parseInt(req.body.interview_gap_days) || 0 : undefined;
 
     if (code && code !== institution.code) {
       const existingCode = await Institution.findOne({ where: { code, _id: { [Op.ne]: institution._id } } });
@@ -208,6 +210,7 @@ router.patch(
     if (phone !== undefined) institution.phone = phone;
     if (address !== undefined) institution.address = address;
     if (status && ['active', 'inactive'].includes(status)) institution.status = status;
+    if (interview_gap_days !== undefined) institution.interview_gap_days = interview_gap_days;
 
     const modulesUpdate = parseModules(req.body);
     if (modulesUpdate) {

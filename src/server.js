@@ -11,7 +11,7 @@ import { config, ALLOWED_ORIGINS } from "./config.js";
 import { closeDatabase, collections, connectDatabase } from "./db.js";
 import bcrypt from "bcryptjs";
 import { hashPassword, verifyPassword, createAuthToken, validateEmail, validatePassword } from "./utils/auth.js";
-import { apiLimiter, strictLimiter } from "./middleware/rateLimiter.js";
+import { apiLimiter, strictLimiter, authLimiter } from "./middleware/rateLimiter.js";
 import authRoutes from "./aptitude/routes/authRoutes.js";
 import adminRoutes from "./aptitude/routes/adminRoutes.js";
 import masterAdminRoutes from "./aptitude/routes/masterAdminRoutes.js";
@@ -29,6 +29,8 @@ import livekitRoutes from "./livekit/routes.js";
 import mentorshipRoutes from "./mentorship/routes.js";
 import subscriptionRoutes from "./subscription/routes.js";
 import helpRoutes from "./help/routes.js";
+import referralRoutes from "./referral/routes.js";
+import referralAdminRoutes from "./referral/adminRoutes.js";
 import { getCodeRunnerHealth } from "./programming/services/executionService.js";
 import { aiService } from "./services/aiService.js";
 import { extractTextFromPdf } from "./services/resumeParser.js";
@@ -68,8 +70,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-CSRF-Token'],
   maxAge: 86400,
 }));
-
-app.options('*', cors());
 
 app.use(helmet({
   contentSecurityPolicy: {
@@ -207,17 +207,8 @@ app.get("/", (req, res) => {
 });
 
 app.get("/api/health", asyncHandler(async (req, res) => {
-  const codeRunner = await getCodeRunnerHealth();
   res.json({
     status: "healthy",
-    version: "1.0-node",
-    database: "postgresql",
-    stt: "groq-whisper-large-v3-turbo",
-    code_runner: {
-      provider: codeRunner.provider,
-      configured: codeRunner.configured,
-      healthy: codeRunner.healthy,
-    },
   });
 }));
 
@@ -276,7 +267,7 @@ app.post("/api/signup", strictLimiter, asyncHandler(async (req, res) => {
   }
 }));
 
-app.post("/api/login", asyncHandler(async (req, res) => {
+app.post("/api/login", authLimiter, asyncHandler(async (req, res) => {
   const { email, password } = req.body || {};
 
   if (!validateEmail(email) || !validatePassword(password)) {
@@ -792,6 +783,8 @@ app.use("/api/livekit", livekitRoutes);
 app.use("/api/mentorship", mentorshipRoutes);
 app.use("/api/subscription", subscriptionRoutes);
 app.use("/api/help", helpRoutes);
+app.use("/api/referral", referralRoutes);
+app.use("/api/master/referral", referralAdminRoutes);
 
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
@@ -1337,19 +1330,19 @@ async function start() {
         {
           plan_key: 'basic', plan_name: 'Basic', duration_months: 1,
           max_level: 1, journey_access: 1, total_interviews: 4,
-          price: 199, gst_percentage: 18, status: 'active',
+          price: 199, gst_percentage: 0, status: 'active',
           features: ['Level 1 Journey Access', '4 AI Interviews', 'Resume Builder', 'Reports & Analytics'],
         },
         {
           plan_key: 'advanced', plan_name: 'Advanced', duration_months: 3,
           max_level: 3, journey_access: 3, total_interviews: 12,
-          price: 499, gst_percentage: 18, status: 'active',
+          price: 499, gst_percentage: 0, status: 'active',
           features: ['Levels 1-3 Journey Access', '12 AI Interviews', 'Resume Builder', 'Reports & Analytics', 'Programming Practice', 'Communication Skills'],
         },
         {
           plan_key: 'professional', plan_name: 'Professional', duration_months: 6,
           max_level: 6, journey_access: 6, total_interviews: 24,
-          price: 849, gst_percentage: 18, status: 'active',
+          price: 849, gst_percentage: 0, status: 'active',
           features: ['All 6 Levels Journey Access', '24 AI Interviews', 'Resume Builder', 'Reports & Analytics', 'Programming Practice', 'Communication Skills', 'Certificates', 'Priority Support'],
         },
       ];
@@ -1481,6 +1474,16 @@ async function start() {
     console.log('Blueprint seeding skipped:', _err.message);
   }
 
+  // ── Phase 4: Institution interview gap setting ─────────────────────────
+  try {
+    await sequelize.query(`ALTER TABLE institutions ADD COLUMN IF NOT EXISTS interview_gap_days INTEGER DEFAULT 0`);
+    // Migrate old column name if it exists
+    await sequelize.query(`ALTER TABLE institutions RENAME COLUMN interview_gap_minutes TO interview_gap_days`).catch(() => {});
+    console.log('Institutions interview_gap_days column ready');
+  } catch (_err) {
+    console.log('interview_gap_days migration skipped:', _err.message);
+  }
+
   // ── Help Requests table ─────────────────────────────────────────────────
   try {
     await sequelize.query(`
@@ -1505,6 +1508,69 @@ async function start() {
     console.log('Help requests table ready');
   } catch (_err) {
     console.log('Help requests table migration skipped:', _err.message);
+  }
+
+  // ── Referral system tables ──────────────────────────────────────────────
+  try {
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS referral_campaigns (
+        _id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(255) NOT NULL,
+        description TEXT DEFAULT '',
+        code VARCHAR(50) NOT NULL UNIQUE,
+        code_type VARCHAR(20) NOT NULL DEFAULT 'campaign',
+        owner_user_id UUID DEFAULT NULL,
+        reward_type VARCHAR(50) NOT NULL DEFAULT 'discount_percent',
+        reward_value FLOAT DEFAULT 0,
+        reward_for_referrer JSONB DEFAULT '{}',
+        reward_for_referred JSONB DEFAULT '{}',
+        start_date TIMESTAMPTZ DEFAULT NOW(),
+        expiry_date TIMESTAMPTZ DEFAULT NULL,
+        maximum_usage INTEGER DEFAULT 0,
+        used_count INTEGER DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'active',
+        created_by VARCHAR(64) DEFAULT '',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_rc_code ON referral_campaigns (code)`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_rc_owner ON referral_campaigns (owner_user_id)`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_rc_status ON referral_campaigns (status)`);
+    console.log('Referral campaigns table ready');
+  } catch (_err) {
+    console.log('Referral campaigns table migration skipped:', _err.message);
+  }
+
+  try {
+    await sequelize.query(`ALTER TABLE referral_campaigns ADD COLUMN IF NOT EXISTS plan_discounts JSONB DEFAULT NULL`);
+  } catch (_err) {
+    // Column may already exist
+  }
+
+  try {
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS referral_history (
+        _id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        campaign_id UUID NOT NULL,
+        referrer_user_id UUID NOT NULL,
+        referred_user_id UUID NOT NULL,
+        subscription_id UUID DEFAULT NULL,
+        reward_status VARCHAR(20) DEFAULT 'pending',
+        reward_given_date TIMESTAMPTZ DEFAULT NULL,
+        reward_details JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_rh_campaign ON referral_history (campaign_id)`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_rh_referrer ON referral_history (referrer_user_id)`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_rh_referred ON referral_history (referred_user_id)`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_rh_subscription ON referral_history (subscription_id)`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_rh_status ON referral_history (reward_status)`);
+    console.log('Referral history table ready');
+  } catch (_err) {
+    console.log('Referral history table migration skipped:', _err.message);
   }
 
   const server = app.listen(config.port, "0.0.0.0", () => {
