@@ -275,16 +275,24 @@ function createSmtpClient({ host, port, secure }) {
   return { command, close, startTls, waitFor };
 }
 
+function ensureUrlProtocol(url) {
+  url = url.trim();
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = 'https://' + url;
+  }
+  return url;
+}
+
 export function getPasswordResetBaseUrl(req) {
   const configured =
     process.env.PASSWORD_RESET_BASE_URL ||
     process.env.FRONTEND_URL ||
     process.env.APP_URL;
 
-  if (configured) return configured;
+  if (configured) return ensureUrlProtocol(configured);
 
   const origin = req.get('origin');
-  if (origin) return origin;
+  if (origin) return ensureUrlProtocol(origin);
 
   return 'http://localhost:5173';
 }
