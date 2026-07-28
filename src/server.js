@@ -1511,10 +1511,23 @@ async function start() {
     console.log('interview_gap_days migration skipped:', _err.message);
   }
 
-  // ── Phase 5: Saved resume for student journeys ────────────────────────
+  // ── Phase 5: Ensure student_journeys has all columns ──────────────────
   try {
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS student_name VARCHAR(255) DEFAULT ''`);
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS student_email VARCHAR(255) DEFAULT ''`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS institution_id UUID DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS journey_access_level INTEGER DEFAULT 0`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS current_level INTEGER DEFAULT 1`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS current_interview_number INTEGER DEFAULT 1`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS completed_interviews INTEGER DEFAULT 0`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS total_interviews INTEGER DEFAULT 24`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS overall_score FLOAT DEFAULT 0`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS readiness_score FLOAT DEFAULT 0`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'not_started'`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS last_interview_at TIMESTAMPTZ DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS target_career_goal VARCHAR(255) DEFAULT ''`);
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS saved_resume_text TEXT DEFAULT NULL`);
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS saved_resume_name VARCHAR(255) DEFAULT NULL`);
     console.log('StudentJourney columns ready');

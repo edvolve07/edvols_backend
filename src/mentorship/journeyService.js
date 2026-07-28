@@ -9,13 +9,62 @@ export class JourneyService {
   async getOrCreateJourney(studentId, studentName, studentEmail, institutionId) {
     let journey = await StudentJourney.findOne({ where: { student_id: studentId } });
     if (!journey) {
+      let accessLevel = 0;
+      try {
+        const user = await User.findByPk(studentId);
+        if (user?.role === 'individual_student') {
+          const subscription = await Subscription.findOne({
+            where: { student_id: studentId, status: 'active' },
+            order: [['created_at', 'DESC']],
+          });
+          if (subscription) {
+            accessLevel = subscription.access_level || 0;
+            await getSequelize().query(
+              `UPDATE individual_students SET subscription_id = :subId, subscription_status = 'active', journey_access = :access, updated_at = NOW() WHERE user_id = :uid`,
+              { replacements: { subId: subscription._id, access: accessLevel, uid: studentId } }
+            );
+          } else {
+            const [[paymentTx]] = await getSequelize().query(
+              `SELECT * FROM payment_transactions WHERE student_id = :uid AND status = 'completed' ORDER BY created_at DESC LIMIT 1`,
+              { replacements: { uid: studentId } }
+            );
+            if (paymentTx) {
+              const planKey = paymentTx.plan_key;
+              const plan = await Plan.findOne({ where: { plan_key: planKey } });
+              if (plan) {
+                accessLevel = plan.journey_access || 3;
+                const sub = await Subscription.create({
+                  student_id: studentId,
+                  plan_key: plan.plan_key,
+                  plan_name: plan.plan_name,
+                  plan_id: plan._id,
+                  access_level: accessLevel,
+                  interviews_total: plan.total_interviews || 50,
+                  status: 'active',
+                  amount_paid: paymentTx.amount || 0,
+                  currency: 'INR',
+                  gst_amount: 0,
+                  start_date: new Date(),
+                  end_date: null,
+                });
+                await getSequelize().query(
+                  `UPDATE individual_students SET subscription_id = :subId, subscription_status = 'active', journey_access = :access, updated_at = NOW() WHERE user_id = :uid`,
+                  { replacements: { subId: sub._id, access: accessLevel, uid: studentId } }
+                );
+              }
+            }
+          }
+        }
+      } catch (_healErr) {
+        console.log('Journey self-heal skipped:', _healErr.message);
+      }
       journey = await StudentJourney.create({
         student_id: studentId,
         student_name: studentName || '',
         student_email: studentEmail || '',
         institution_id: institutionId || null,
-        journey_access_level: 0,
-        current_level: 1,
+        journey_access_level: accessLevel,
+        current_level: accessLevel > 0 ? 1 : 1,
         current_interview_number: 1,
         completed_interviews: 0,
         status: 'not_started',
