@@ -82,11 +82,11 @@ export class JourneyService {
         `, { replacements: { sid: studentId } });
         if (synced && synced.cnt > 0) {
           let newLevel = 1;
-          if (synced.cnt >= 16) newLevel = 6;
-          else if (synced.cnt >= 12) newLevel = 5;
-          else if (synced.cnt >= 8) newLevel = 4;
-          else if (synced.cnt >= 4) newLevel = 3;
-          else if (synced.cnt >= 2) newLevel = 2;
+          if (synced.cnt >= 22) newLevel = 6;
+          else if (synced.cnt >= 18) newLevel = 5;
+          else if (synced.cnt >= 12) newLevel = 4;
+          else if (synced.cnt >= 8) newLevel = 3;
+          else if (synced.cnt >= 4) newLevel = 2;
           const readiness = Math.min(100, Math.round(
             (synced.cnt / 24) * 40 +
             (synced.avg_score / 100) * 35 +
@@ -441,8 +441,10 @@ export class JourneyService {
       order: [['interview_number', 'ASC']],
     });
 
+    const totalInterviews = Math.max(completedInterviews.length, journey.completed_interviews || 0);
+
     return {
-      total_interviews: completedInterviews.length,
+      total_interviews: totalInterviews,
       total_available: journey.journey_access_level > 0 ? this._getMaxInterviewsForAccess(journey.journey_access_level) : 0,
       average_score: journey.overall_score,
       current_level: journey.current_level,

@@ -634,6 +634,37 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
 
   try {
     const studentId = session.student_id;
+
+    const [[existingJI]] = await getSequelize().query(
+      `SELECT _id FROM journey_interviews WHERE session_id = :sid LIMIT 1`,
+      { replacements: { sid: sessionId } }
+    );
+    if (!existingJI) {
+      const [[jiCount]] = await getSequelize().query(
+        `SELECT COALESCE(MAX(interview_number), 0) AS max_num FROM journey_interviews WHERE student_id = :sid`,
+        { replacements: { sid: studentId } }
+      );
+      const nextNum = (jiCount?.max_num || 0) + 1;
+      const role = session.role || '';
+      const domain = session.domain || '';
+      await getSequelize().query(`
+        INSERT INTO journey_interviews (_id, student_id, interview_number, blueprint_title, level, status, session_id, report_id, overall_score, grade, started_at, completed_at, level_at_time, created_at, updated_at)
+        VALUES (gen_random_uuid(), :sid, :num, :title, 1, 'completed', :sessionId, :reportId, :score, :grade, :started, :completed, 1, NOW(), NOW())
+      `, {
+        replacements: {
+          sid: studentId,
+          num: nextNum,
+          title: (role || 'Interview') + ' - ' + (domain || ''),
+          sessionId,
+          reportId: report.report_id,
+          score: percentage,
+          grade,
+          started: session.created_at || new Date(),
+          completed: new Date(),
+        }
+      });
+    }
+
     const [[synced]] = await getSequelize().query(`
       SELECT
         COUNT(*)::int AS cnt,
@@ -645,11 +676,11 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
     `, { replacements: { sid: studentId } });
     if (synced && synced.cnt > 0) {
       let newLevel = 1;
-      if (synced.cnt >= 16) newLevel = 6;
-      else if (synced.cnt >= 12) newLevel = 5;
-      else if (synced.cnt >= 8) newLevel = 4;
-      else if (synced.cnt >= 4) newLevel = 3;
-      else if (synced.cnt >= 2) newLevel = 2;
+      if (synced.cnt >= 22) newLevel = 6;
+      else if (synced.cnt >= 18) newLevel = 5;
+      else if (synced.cnt >= 12) newLevel = 4;
+      else if (synced.cnt >= 8) newLevel = 3;
+      else if (synced.cnt >= 4) newLevel = 2;
       const readiness = Math.min(100, Math.round(
         (synced.cnt / 24) * 40 +
         (synced.avg_score / 100) * 35 +
