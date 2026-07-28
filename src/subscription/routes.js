@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireAuth, requireRole } from '../aptitude/middleware/auth.js';
 import { asyncHandler, HttpError } from '../utils/httpError.js';
 import { getSequelize } from '../database/connection.js';
-import { Subscription, PaymentTransaction, StudentJourney, User, Plan, ReferralCampaign, IndividualStudent } from '../database/index.js';
+import { Subscription, PaymentTransaction, StudentJourney, User, Admin, Student, Plan, ReferralCampaign, IndividualStudent } from '../database/index.js';
 import { config } from '../config.js';
 import { validateReferralCode, applyReferralReward, computeReferralDiscount } from '../referral/service.js';
 import bcrypt from 'bcryptjs';
@@ -896,8 +896,15 @@ router.post('/check-email', asyncHandler(async (req, res) => {
   const { email } = req.body || {};
   if (!email || typeof email !== 'string') throw new HttpError(400, 'Email is required');
   const normalizedEmail = email.trim().toLowerCase();
-  const existing = await User.findOne({ where: { email: normalizedEmail } });
-  res.json({ exists: !!existing, email: normalizedEmail });
+
+  const [userExists, adminExists, studentExists] = await Promise.all([
+    User.findOne({ where: { email: normalizedEmail }, attributes: ['_id'], raw: true }),
+    Admin.findOne({ where: { email: normalizedEmail }, attributes: ['_id'], raw: true }),
+    Student.findOne({ where: { email: normalizedEmail }, attributes: ['_id'], raw: true }),
+  ]);
+
+  const exists = !!(userExists || adminExists || studentExists);
+  res.json({ exists, email: normalizedEmail });
 }));
 
 router.post('/guest-create-order', asyncHandler(async (req, res) => {
