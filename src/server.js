@@ -1580,6 +1580,57 @@ async function start() {
     console.log('Users auth column migration skipped:', _err.message);
   }
 
+  // ── Phase 5d: Sync student_journeys from journey_interviews ──────────
+  try {
+    const levelConfig = [
+      { level: 1, unlock_after: 0, range: [1, 4] },
+      { level: 2, unlock_after: 2, range: [1, 8] },
+      { level: 3, unlock_after: 4, range: [1, 12] },
+      { level: 4, unlock_after: 8, range: [1, 18] },
+      { level: 5, unlock_after: 12, range: [1, 22] },
+      { level: 6, unlock_after: 16, range: [1, 24] },
+    ];
+    await sequelize.query(`
+      UPDATE student_journeys sj SET
+        completed_interviews = COALESCE(sub.cnt, 0),
+        overall_score = COALESCE(sub.avg_score, 0),
+        current_level = CASE
+          WHEN COALESCE(sub.cnt, 0) >= 16 THEN 6
+          WHEN COALESCE(sub.cnt, 0) >= 12 THEN 5
+          WHEN COALESCE(sub.cnt, 0) >= 8 THEN 4
+          WHEN COALESCE(sub.cnt, 0) >= 4 THEN 3
+          WHEN COALESCE(sub.cnt, 0) >= 2 THEN 2
+          ELSE 1
+        END,
+        readiness_score = LEAST(100, ROUND(
+          (COALESCE(sub.cnt, 0) / 24.0) * 40 +
+          (COALESCE(sub.avg_score, 0) / 100.0) * 35 +
+          CASE WHEN COALESCE(sub.cnt, 0) >= 4 THEN 10 ELSE (COALESCE(sub.cnt, 0) / 4.0) * 10 END +
+          LEAST(15, (COALESCE(sub.cnt, 0) / 24.0) * 15)
+        )),
+        status = CASE WHEN COALESCE(sub.cnt, 0) >= 24 THEN 'completed' WHEN COALESCE(sub.cnt, 0) > 0 THEN 'in_progress' ELSE sj.status END,
+        started_at = CASE WHEN sj.started_at IS NULL AND COALESCE(sub.cnt, 0) > 0 THEN sub.first_started ELSE sj.started_at END,
+        last_interview_at = sub.last_completed
+      FROM (
+        SELECT
+          ji.student_id,
+          COUNT(*)::int AS cnt,
+          ROUND(AVG(COALESCE(ji.overall_score, 0))::numeric, 1)::float AS avg_score,
+          MIN(ji.started_at) AS first_started,
+          MAX(ji.completed_at) AS last_completed
+        FROM journey_interviews ji
+        WHERE ji.status = 'completed'
+        GROUP BY ji.student_id
+      ) sub
+      WHERE sj.student_id = sub.student_id
+        AND (sj.completed_interviews != sub.cnt OR sj.completed_interviews IS NULL OR sj.completed_interviews = 0)
+    `);
+    const synced = await sequelize.query(`SELECT COUNT(*)::int AS cnt FROM student_journeys WHERE completed_interviews > 0`, { plain: true });
+    console.log(`Journey sync complete: ${synced?.cnt || 0} journeys with completed interviews`);
+  } catch (_err) {
+    console.log('Journey sync skipped:', _err.message);
+  }
+
   // ── Help Requests table ─────────────────────────────────────────────────
   try {
     await sequelize.query(`

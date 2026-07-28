@@ -69,6 +69,44 @@ export class JourneyService {
         completed_interviews: 0,
         status: 'not_started',
       });
+    } else if (journey.completed_interviews === 0 || !journey.started_at) {
+      try {
+        const [[synced]] = await getSequelize().query(`
+          SELECT
+            COUNT(*)::int AS cnt,
+            ROUND(AVG(COALESCE(overall_score, 0))::numeric, 1)::float AS avg_score,
+            MIN(started_at) AS first_started,
+            MAX(completed_at) AS last_completed
+          FROM journey_interviews
+          WHERE student_id = :sid AND status = 'completed'
+        `, { replacements: { sid: studentId } });
+        if (synced && synced.cnt > 0) {
+          let newLevel = 1;
+          if (synced.cnt >= 16) newLevel = 6;
+          else if (synced.cnt >= 12) newLevel = 5;
+          else if (synced.cnt >= 8) newLevel = 4;
+          else if (synced.cnt >= 4) newLevel = 3;
+          else if (synced.cnt >= 2) newLevel = 2;
+          const readiness = Math.min(100, Math.round(
+            (synced.cnt / 24) * 40 +
+            (synced.avg_score / 100) * 35 +
+            (synced.cnt >= 4 ? 10 : (synced.cnt / 4) * 10) +
+            Math.min(15, (synced.cnt / 24) * 15)
+          ));
+          await journey.update({
+            completed_interviews: synced.cnt,
+            overall_score: synced.avg_score,
+            current_level: newLevel,
+            readiness_score: readiness,
+            started_at: synced.first_started,
+            last_interview_at: synced.last_completed,
+            status: synced.cnt >= 24 ? 'completed' : 'in_progress',
+          });
+          journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+        }
+      } catch (_syncErr) {
+        console.log('Journey data sync skipped:', _syncErr.message);
+      }
     }
     return journey;
   }
