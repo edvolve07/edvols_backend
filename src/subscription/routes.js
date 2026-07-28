@@ -770,6 +770,22 @@ router.get('/admin/individual-students', requireAuth, requireRole('master_admin'
   });
 }));
 
+router.delete('/admin/individual-students/:studentId', requireAuth, requireRole('master_admin'), asyncHandler(async (req, res) => {
+  const { studentId } = req.params;
+  const user = await User.findByPk(studentId);
+  if (!user) throw new HttpError(404, 'Student not found');
+  if (user.role !== 'individual_student') throw new HttpError(400, 'User is not an individual student');
+
+  const sequelize = getSequelize();
+  await sequelize.query(`DELETE FROM individual_students WHERE user_id = :uid`, { replacements: { uid: studentId } });
+  await StudentJourney.destroy({ where: { student_id: studentId } });
+  await Subscription.destroy({ where: { student_id: studentId } });
+  await PaymentTransaction.destroy({ where: { student_id: studentId } });
+  await User.destroy({ where: { _id: studentId } });
+
+  res.status(204).end();
+}));
+
 router.patch('/admin/individual-students/:studentId/subscription', requireAuth, requireRole('master_admin'), asyncHandler(async (req, res) => {
   const { action, plan_key } = req.body || {};
   const studentId = req.params.studentId;
@@ -875,6 +891,14 @@ function toSafeJSON(user) {
     email_verified: user.email_verified,
   };
 }
+
+router.post('/check-email', asyncHandler(async (req, res) => {
+  const { email } = req.body || {};
+  if (!email || typeof email !== 'string') throw new HttpError(400, 'Email is required');
+  const normalizedEmail = email.trim().toLowerCase();
+  const existing = await User.findOne({ where: { email: normalizedEmail } });
+  res.json({ exists: !!existing, email: normalizedEmail });
+}));
 
 router.post('/guest-create-order', asyncHandler(async (req, res) => {
   const { plan_key, referral_code } = req.body || {};
