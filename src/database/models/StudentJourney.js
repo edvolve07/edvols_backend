@@ -75,6 +75,14 @@ export const StudentJourney = sequelize.define('StudentJourney', {
     type: DataTypes.STRING(255),
     defaultValue: '',
   },
+  saved_resume_text: {
+    type: DataTypes.TEXT,
+    defaultValue: null,
+  },
+  saved_resume_name: {
+    type: DataTypes.STRING(255),
+    defaultValue: null,
+  },
 }, {
   tableName: 'student_journeys',
   indexes: [

@@ -49,7 +49,7 @@ import { requireAuth, requireModuleAccess, requireRole } from "./aptitude/middle
 import { formatDisplayName } from "./aptitude/utils/nameFormat.js";
 import { validateFileType } from "./utils/fileValidation.js";
 import { buildUserContext } from "./aptitude/utils/userContext.js";
-import { Op, User, InterviewSession, InterviewReport, AptitudeQuestion, AptitudeResult, getSequelize, syncDatabase } from "./database/index.js";
+import { Op, User, StudentJourney, InterviewSession, InterviewReport, AptitudeQuestion, AptitudeResult, getSequelize, syncDatabase } from "./database/index.js";
 
 const app = express();
 const upload = multer({
@@ -345,27 +345,54 @@ app.get("/api/me", asyncHandler(async (req, res) => {
 }));
 
 app.post("/api/start", requireAuth, requireModuleAccess('ai_interview'), upload.single("file"), asyncHandler(async (req, res) => {
-  const { domain, role } = req.body;
+  const { domain, role, use_saved } = req.body;
 
   if (!domain || !role) {
     throw new HttpError(400, "domain and role are required");
   }
 
-  if (!req.file) {
+  let resumeText = '';
+
+  if (use_saved === 'true' && !req.file) {
+    const journey = await StudentJourney.findOne({ where: { student_id: req.user._id } });
+    resumeText = journey?.saved_resume_text || '';
+    if (!resumeText) {
+      throw new HttpError(400, "No saved resume found. Please upload a PDF.");
+    }
+  }
+
+  if (req.file) {
+    if (!req.file.originalname.toLowerCase().endsWith(".pdf")) {
+      throw new HttpError(400, "PDF required");
+    }
+
+    const fileBuffer = await fs.readFile(req.file.path);
+    const typeCheck = validateFileType(fileBuffer, req.file.originalname);
+    if (!typeCheck.valid) {
+      throw new HttpError(400, typeCheck.error);
+    }
+
+    resumeText = await extractTextFromPdf(fileBuffer);
+
+    try {
+      const [journey] = await StudentJourney.findOrCreate({
+        where: { student_id: req.user._id },
+        defaults: { student_id: req.user._id, saved_resume_text: resumeText, saved_resume_name: req.file.originalname },
+      });
+      if (journey.saved_resume_text === null || journey.saved_resume_text !== resumeText) {
+        await journey.update({ saved_resume_text: resumeText, saved_resume_name: req.file.originalname });
+      }
+    } catch (err) {
+      console.error('Failed to save resume to journey:', err.message);
+    }
+
+    try { await fs.unlink(req.file.path); } catch {}
+  }
+
+  if (!resumeText) {
     throw new HttpError(400, "Resume PDF required");
   }
 
-  if (!req.file.originalname.toLowerCase().endsWith(".pdf")) {
-    throw new HttpError(400, "PDF required");
-  }
-
-  const fileBuffer = await fs.readFile(req.file.path);
-  const typeCheck = validateFileType(fileBuffer, req.file.originalname);
-  if (!typeCheck.valid) {
-    throw new HttpError(400, typeCheck.error);
-  }
-
-  const resumeText = await extractTextFromPdf(fileBuffer);
   const ats = await aiService.analyzeResume(resumeText);
   const firstQuestion = await aiService.generateFirstQuestion(resumeText, domain, role);
   const sessionId = uuidv4();
@@ -1482,6 +1509,62 @@ async function start() {
     console.log('Institutions interview_gap_days column ready');
   } catch (_err) {
     console.log('interview_gap_days migration skipped:', _err.message);
+  }
+
+  // ── Phase 5: Saved resume for student journeys ────────────────────────
+  try {
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS student_name VARCHAR(255) DEFAULT ''`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS student_email VARCHAR(255) DEFAULT ''`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS saved_resume_text TEXT DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS saved_resume_name VARCHAR(255) DEFAULT NULL`);
+    console.log('StudentJourney columns ready');
+  } catch (_err) {
+    console.log('StudentJourney migration skipped:', _err.message);
+  }
+
+  // ── Phase 5b: Ensure subscription & payment columns exist ─────────────
+  try {
+    await sequelize.query(`ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS plan_id UUID DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS plan_key VARCHAR(50) DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE payment_transactions ADD COLUMN IF NOT EXISTS plan_name VARCHAR(100) DEFAULT NULL`);
+    console.log('Subscription/payment columns ready');
+  } catch (_err) {
+    console.log('Subscription/payment column migration skipped:', _err.message);
+  }
+
+  // ── Phase 5c: Ensure sync-only tables have all columns ───────────────
+  try {
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS student_role VARCHAR(50) DEFAULT ''`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS resume_text TEXT DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS ats_analysis JSONB DEFAULT '{}'`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS history JSONB DEFAULT '[]'`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS current_question JSONB DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS question_count INTEGER DEFAULT 1`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active'`);
+    console.log('InterviewSession columns ready');
+  } catch (_err) {
+    console.log('InterviewSession migration skipped:', _err.message);
+  }
+
+  try {
+    await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS ats_analysis JSONB DEFAULT '{}'`);
+    await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS question_breakdown JSONB DEFAULT '[]'`);
+    await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS strengths JSONB DEFAULT '[]'`);
+    await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS areas_to_improve JSONB DEFAULT '[]'`);
+    await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS interview_tips JSONB DEFAULT '[]'`);
+    console.log('InterviewReport columns ready');
+  } catch (_err) {
+    console.log('InterviewReport migration skipped:', _err.message);
+  }
+
+  try {
+    await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_token VARCHAR(255) DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_expires_at TIMESTAMPTZ DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_token_hash VARCHAR(255) DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ DEFAULT NULL`);
+    console.log('Users auth columns ready');
+  } catch (_err) {
+    console.log('Users auth column migration skipped:', _err.message);
   }
 
   // ── Help Requests table ─────────────────────────────────────────────────

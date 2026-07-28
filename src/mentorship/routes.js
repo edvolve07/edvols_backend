@@ -113,10 +113,17 @@ router.post('/subscribe', requireAuth, asyncHandler(async (req, res) => {
 router.post('/interview/start', requireAuth, upload.single('resume'), asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
   const info = getStudentInfo(req);
+  const useSaved = req.body?.use_saved === 'true' || req.body?.use_saved === true;
   const result = await journeyService.startInterview(studentId, info.name, info.email);
 
   let resumeText = '';
-  if (req.file) {
+
+  if (useSaved && !req.file) {
+    const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+    resumeText = journey?.saved_resume_text || '';
+  }
+
+  if (!resumeText && req.file) {
     try {
       const fileBuffer = await fs.readFile(req.file.path);
       resumeText = await extractTextFromPdf(fileBuffer);
@@ -159,10 +166,17 @@ router.post('/interview/start', requireAuth, upload.single('resume'), asyncHandl
 router.post('/interview/start/:interviewNumber', requireAuth, upload.single('resume'), asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
   const interviewNumber = parseInt(req.params.interviewNumber);
+  const useSaved = req.body?.use_saved === 'true' || req.body?.use_saved === true;
   const result = await journeyService.startInterviewById(studentId, interviewNumber);
 
   let resumeText = '';
-  if (req.file) {
+
+  if (useSaved && !req.file) {
+    const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+    resumeText = journey?.saved_resume_text || '';
+  }
+
+  if (!resumeText && req.file) {
     try {
       const fileBuffer = await fs.readFile(req.file.path);
       resumeText = await extractTextFromPdf(fileBuffer);
@@ -354,6 +368,61 @@ router.post('/interview/end', requireAuth, asyncHandler(async (req, res) => {
   await journeyService.completeInterview(studentId, sessionId, pct, reportData.overall.grade);
 
   res.json(report);
+}));
+
+// ═══════════════════════════════════════════════════════
+// SAVED RESUME ENDPOINTS
+// ═══════════════════════════════════════════════════════
+
+router.get('/resume/saved', requireAuth, asyncHandler(async (req, res) => {
+  const studentId = getStudentId(req);
+  const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+  if (!journey || !journey.saved_resume_text) {
+    return res.json({ hasSaved: false });
+  }
+  res.json({
+    hasSaved: true,
+    name: journey.saved_resume_name || 'Resume',
+    preview: journey.saved_resume_text.slice(0, 200),
+  });
+}));
+
+router.put('/resume/saved', requireAuth, upload.single('resume'), asyncHandler(async (req, res) => {
+  const studentId = getStudentId(req);
+  let resumeText = '';
+  let resumeName = req.file?.originalname || 'Resume';
+
+  if (req.file) {
+    try {
+      const fileBuffer = await fs.readFile(req.file.path);
+      resumeText = await extractTextFromPdf(fileBuffer);
+    } catch (err) {
+      console.error('Failed to extract resume text:', err.message);
+    } finally {
+      try { await fs.unlink(req.file.path); } catch {}
+    }
+  }
+
+  if (!resumeText) throw new HttpError(400, 'Could not extract text from resume');
+
+  const [journey] = await StudentJourney.findOrCreate({
+    where: { student_id: studentId },
+    defaults: { student_id: studentId, saved_resume_text: resumeText, saved_resume_name: resumeName },
+  });
+  if (journey.saved_resume_text !== undefined) {
+    await journey.update({ saved_resume_text: resumeText, saved_resume_name: resumeName });
+  }
+
+  res.json({ hasSaved: true, name: resumeName, preview: resumeText.slice(0, 200) });
+}));
+
+router.delete('/resume/saved', requireAuth, asyncHandler(async (req, res) => {
+  const studentId = getStudentId(req);
+  const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+  if (journey) {
+    await journey.update({ saved_resume_text: null, saved_resume_name: null });
+  }
+  res.json({ hasSaved: false });
 }));
 
 // ═══════════════════════════════════════════════════════
