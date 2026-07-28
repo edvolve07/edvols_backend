@@ -223,11 +223,17 @@ function createSmtpClient({ host, port, secure }) {
     });
   }
 
-  attach(
-    secure
-      ? tls.connect({ host, port, servername: host, timeout: 30000, family: 4 })
-      : net.connect({ host, port, timeout: 30000, family: 4 }),
-  );
+  const rawSocket = secure
+    ? tls.connect({ host, port, servername: host, timeout: 10000, family: 4 })
+    : net.connect({ host, port, timeout: 10000, family: 4 });
+
+  const connectTimer = setTimeout(() => {
+    rawSocket.destroy(new Error('SMTP connect timed out after 10s'));
+  }, 10000);
+  rawSocket.on('connect', () => clearTimeout(connectTimer));
+  rawSocket.on('error', () => clearTimeout(connectTimer));
+
+  attach(rawSocket);
 
   function waitFor(expectedCodes) {
     const codes = Array.isArray(expectedCodes) ? expectedCodes : [expectedCodes];
