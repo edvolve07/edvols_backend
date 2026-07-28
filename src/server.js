@@ -1647,11 +1647,11 @@ async function start() {
         completed_interviews = COALESCE(sub.cnt, 0),
         overall_score = COALESCE(sub.avg_score, 0),
         current_level = CASE
-          WHEN COALESCE(sub.cnt, 0) >= 16 THEN 6
-          WHEN COALESCE(sub.cnt, 0) >= 12 THEN 5
-          WHEN COALESCE(sub.cnt, 0) >= 8 THEN 4
-          WHEN COALESCE(sub.cnt, 0) >= 4 THEN 3
-          WHEN COALESCE(sub.cnt, 0) >= 2 THEN 2
+          WHEN COALESCE(sub.cnt, 0) >= 22 THEN 6
+          WHEN COALESCE(sub.cnt, 0) >= 18 THEN 5
+          WHEN COALESCE(sub.cnt, 0) >= 12 THEN 4
+          WHEN COALESCE(sub.cnt, 0) >= 8 THEN 3
+          WHEN COALESCE(sub.cnt, 0) >= 4 THEN 2
           ELSE 1
         END,
         readiness_score = LEAST(100, ROUND(
