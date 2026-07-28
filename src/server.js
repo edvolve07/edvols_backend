@@ -632,6 +632,66 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
   });
   await updateSessionAtomic(sessionId, { status: "ended" });
 
+  try {
+    const studentId = session.student_id;
+    const [[synced]] = await getSequelize().query(`
+      SELECT
+        COUNT(*)::int AS cnt,
+        ROUND(AVG(COALESCE((overall->>'percentage')::float, 0))::numeric, 1)::float AS avg_score,
+        MIN(created_at) AS first_started,
+        MAX(created_at) AS last_completed
+      FROM interview_reports
+      WHERE student_id = :sid
+    `, { replacements: { sid: studentId } });
+    if (synced && synced.cnt > 0) {
+      let newLevel = 1;
+      if (synced.cnt >= 16) newLevel = 6;
+      else if (synced.cnt >= 12) newLevel = 5;
+      else if (synced.cnt >= 8) newLevel = 4;
+      else if (synced.cnt >= 4) newLevel = 3;
+      else if (synced.cnt >= 2) newLevel = 2;
+      const readiness = Math.min(100, Math.round(
+        (synced.cnt / 24) * 40 +
+        (synced.avg_score / 100) * 35 +
+        (synced.cnt >= 4 ? 10 : (synced.cnt / 4) * 10) +
+        Math.min(15, (synced.cnt / 24) * 15)
+      ));
+      const [[existing]] = await getSequelize().query(
+        `SELECT _id FROM student_journeys WHERE student_id = :sid LIMIT 1`,
+        { replacements: { sid: studentId } }
+      );
+      if (existing) {
+        await getSequelize().query(`
+          UPDATE student_journeys SET
+            completed_interviews = :cnt,
+            overall_score = :avg,
+            current_level = :lvl,
+            readiness_score = :ready,
+            started_at = COALESCE(started_at, :first),
+            last_interview_at = :last,
+            status = CASE WHEN :cnt >= 24 THEN 'completed' WHEN :cnt > 0 THEN 'in_progress' ELSE status END
+          WHERE student_id = :sid
+        `, { replacements: { cnt: synced.cnt, avg: synced.avg_score, lvl: newLevel, ready: readiness, first: synced.first_started, last: synced.last_completed, sid: studentId } });
+      } else {
+        await StudentJourney.create({
+          student_id: studentId,
+          student_name: req.user.name || '',
+          student_email: req.user.email || '',
+          journey_access_level: newLevel,
+          current_level: newLevel,
+          completed_interviews: synced.cnt,
+          overall_score: synced.avg_score,
+          readiness_score: readiness,
+          started_at: synced.first_started,
+          last_interview_at: synced.last_completed,
+          status: synced.cnt >= 24 ? 'completed' : 'in_progress',
+        });
+      }
+    }
+  } catch (_syncErr) {
+    console.log('Post-interview journey sync failed:', _syncErr.message);
+  }
+
   res.json(report);
 }));
 
@@ -1580,16 +1640,8 @@ async function start() {
     console.log('Users auth column migration skipped:', _err.message);
   }
 
-  // ── Phase 5d: Sync student_journeys from journey_interviews ──────────
+  // ── Phase 5d: Sync student_journeys from interview data ─────────────
   try {
-    const levelConfig = [
-      { level: 1, unlock_after: 0, range: [1, 4] },
-      { level: 2, unlock_after: 2, range: [1, 8] },
-      { level: 3, unlock_after: 4, range: [1, 12] },
-      { level: 4, unlock_after: 8, range: [1, 18] },
-      { level: 5, unlock_after: 12, range: [1, 22] },
-      { level: 6, unlock_after: 16, range: [1, 24] },
-    ];
     await sequelize.query(`
       UPDATE student_journeys sj SET
         completed_interviews = COALESCE(sub.cnt, 0),
@@ -1613,14 +1665,13 @@ async function start() {
         last_interview_at = sub.last_completed
       FROM (
         SELECT
-          ji.student_id,
+          ir.student_id,
           COUNT(*)::int AS cnt,
-          ROUND(AVG(COALESCE(ji.overall_score, 0))::numeric, 1)::float AS avg_score,
-          MIN(ji.started_at) AS first_started,
-          MAX(ji.completed_at) AS last_completed
-        FROM journey_interviews ji
-        WHERE ji.status = 'completed'
-        GROUP BY ji.student_id
+          ROUND(AVG(COALESCE((ir.overall->>'percentage')::float, 0))::numeric, 1)::float AS avg_score,
+          MIN(ir.created_at) AS first_started,
+          MAX(ir.created_at) AS last_completed
+        FROM interview_reports ir
+        GROUP BY ir.student_id
       ) sub
       WHERE sj.student_id = sub.student_id
         AND (sj.completed_interviews != sub.cnt OR sj.completed_interviews IS NULL OR sj.completed_interviews = 0)
@@ -1629,6 +1680,55 @@ async function start() {
     console.log(`Journey sync complete: ${synced?.cnt || 0} journeys with completed interviews`);
   } catch (_err) {
     console.log('Journey sync skipped:', _err.message);
+  }
+
+  // ── Phase 5e: Backfill journey_interviews from interview_reports ─────
+  try {
+    const [existingStudents] = await sequelize.query(
+      `SELECT DISTINCT student_id FROM interview_reports`
+    );
+    for (const row of existingStudents) {
+      const sid = row.student_id;
+      const reports = await sequelize.query(
+        `SELECT ir.session_id, ir.report_id, ir.interview_role, ir.interview_domain,
+                ir.overall, ir.created_at
+         FROM interview_reports ir
+         LEFT JOIN journey_interviews ji ON ji.session_id = ir.session_id
+         WHERE ir.student_id = :sid AND ji._id IS NULL
+         ORDER BY ir.created_at ASC`,
+        { replacements: { sid } }
+      );
+      const [[maxResult]] = await sequelize.query(
+        `SELECT COALESCE(MAX(interview_number), 0) AS max_num FROM journey_interviews WHERE student_id = :sid`,
+        { replacements: { sid } }
+      );
+      let nextNum = (maxResult?.max_num || 0) + 1;
+      for (const r of reports[0]) {
+        const pct = Number(r.overall?.percentage || 0);
+        const grade = pct >= 80 ? 'A' : pct >= 60 ? 'B' : pct >= 40 ? 'C' : 'D';
+        await sequelize.query(`
+          INSERT INTO journey_interviews (_id, student_id, interview_number, blueprint_title, level, status, session_id, report_id, overall_score, grade, started_at, completed_at, level_at_time, created_at, updated_at)
+          VALUES (gen_random_uuid(), :sid, :num, :title, 1, 'completed', :sessionId, :reportId, :score, :grade, :started, :completed, 1, :created, :created)
+        `, {
+          replacements: {
+            sid,
+            num: nextNum,
+            title: (r.interview_role || 'Interview') + ' - ' + (r.interview_domain || ''),
+            sessionId: r.session_id,
+            reportId: r.report_id,
+            score: pct,
+            grade,
+            started: r.created_at,
+            completed: r.created_at,
+            created: r.created_at,
+          }
+        });
+        nextNum++;
+      }
+    }
+    console.log('Journey interviews backfill complete');
+  } catch (_err) {
+    console.log('Journey interviews backfill skipped:', _err.message);
   }
 
   // ── Help Requests table ─────────────────────────────────────────────────

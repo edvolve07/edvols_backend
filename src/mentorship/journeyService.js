@@ -74,11 +74,11 @@ export class JourneyService {
         const [[synced]] = await getSequelize().query(`
           SELECT
             COUNT(*)::int AS cnt,
-            ROUND(AVG(COALESCE(overall_score, 0))::numeric, 1)::float AS avg_score,
-            MIN(started_at) AS first_started,
-            MAX(completed_at) AS last_completed
-          FROM journey_interviews
-          WHERE student_id = :sid AND status = 'completed'
+            ROUND(AVG(COALESCE((overall->>'percentage')::float, 0))::numeric, 1)::float AS avg_score,
+            MIN(created_at) AS first_started,
+            MAX(created_at) AS last_completed
+          FROM interview_reports
+          WHERE student_id = :sid
         `, { replacements: { sid: studentId } });
         if (synced && synced.cnt > 0) {
           let newLevel = 1;
