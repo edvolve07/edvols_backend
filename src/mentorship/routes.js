@@ -54,6 +54,14 @@ router.get('/journey/interviews', requireAuth, asyncHandler(async (req, res) => 
   res.json({ interviews });
 }));
 
+router.get('/placement-progress', requireAuth, asyncHandler(async (req, res) => {
+  const studentId = getStudentId(req);
+  const info = getStudentInfo(req);
+  await journeyService.getOrCreateJourney(studentId, info.name, info.email, info.institutionId);
+  const data = await journeyService.getPlacementProgress(studentId);
+  res.json(data);
+}));
+
 router.get('/progress', requireAuth, asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
   const progress = await journeyService.getProgress(studentId);

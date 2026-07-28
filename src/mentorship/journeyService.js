@@ -432,6 +432,173 @@ export class JourneyService {
     return Math.min(100, Math.round(completionWeight + scoreWeight + consistencyBonus + levelBonus));
   }
 
+  async getPlacementProgress(studentId) {
+    const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+    if (!journey) {
+      return {
+        currentLevel: 1,
+        currentLevelName: 'Foundation',
+        placementReadiness: 0,
+        averageScore: 0,
+        completedInterviews: 0,
+        allowedInterviews: 0,
+        remainingInterviews: 0,
+        progressPercentage: 0,
+        currentPlan: null,
+        nextInterviewAvailable: null,
+        levels: LEVELS.map(l => ({
+          id: l.level, name: l.name, status: l.level === 1 ? 'current' : 'locked',
+          completedInterviews: 0, requiredInterviews: l.unlock_after_interviews,
+        })),
+        recentInterviews: [],
+        trends: [],
+      };
+    }
+
+    const completedCount = Math.max(
+      await JourneyInterview.count({ where: { student_id: studentId, status: 'completed' } }),
+      journey.completed_interviews || 0
+    );
+
+    const allCompleted = await JourneyInterview.findAll({
+      where: { student_id: studentId, status: 'completed' },
+      order: [['interview_number', 'ASC']],
+    });
+
+    const avgScore = allCompleted.length > 0
+      ? allCompleted.reduce((sum, iv) => sum + (iv.overall_score || 0), 0) / allCompleted.length
+      : (journey.overall_score || 0);
+
+    let currentLevel = 1;
+    for (const level of LEVELS) {
+      if (completedCount >= level.unlock_after_interviews) {
+        currentLevel = level.level;
+      }
+    }
+    const currentLevelObj = LEVELS.find(l => l.level === currentLevel);
+    const nextLevelObj = LEVELS.find(l => l.level === currentLevel + 1);
+    const currentThreshold = currentLevelObj?.unlock_after_interviews || 0;
+    const nextThreshold = nextLevelObj?.unlock_after_interviews;
+
+    const accessLevel = journey.journey_access_level || 0;
+    const maxInterviews = this._getMaxInterviewsForAccess(accessLevel);
+    const remaining = Math.max(0, maxInterviews - completedCount);
+    const progressPct = nextThreshold != null
+      ? Math.max(0, Math.min(100, Math.round(((completedCount - currentThreshold) / (nextThreshold - currentThreshold)) * 100)))
+      : (completedCount > 0 ? 100 : 0);
+
+    const readinessScore = journey.readiness_score || this.calculateReadiness(completedCount, avgScore, allCompleted);
+
+    let subscription = null;
+    try {
+      const sub = await Subscription.findOne({
+        where: { student_id: studentId, status: 'active' },
+        order: [['created_at', 'DESC']],
+      });
+      if (sub) {
+        subscription = {
+          name: sub.plan_name || sub.plan_key,
+          status: sub.status,
+          expiryDate: sub.expires_at,
+          accessLevel: sub.access_level,
+          interviewsTotal: sub.interviews_total,
+        };
+      }
+    } catch (_e) {}
+
+    let nextAvailable = null;
+    try {
+      const lockInfo = await this._getLockStatus(studentId, journey);
+      nextAvailable = lockInfo?.nextUnlockAt || null;
+    } catch (_e) {}
+
+    const levels = LEVELS.map(l => {
+      const levelCompleted = Math.min(
+        completedCount - l.unlock_after_interviews,
+        l.level === currentLevel ? (nextThreshold != null ? nextThreshold - l.unlock_after_interviews : completedCount - l.unlock_after_interviews) : (LEVELS.find(nl => nl.level === l.level + 1)?.unlock_after_interviews - l.unlock_after_interviews || 24)
+      );
+      const levelTotal = l.level < 6
+        ? (LEVELS.find(nl => nl.level === l.level + 1)?.unlock_after_interviews || 24) - l.unlock_after_interviews
+        : 24 - l.unlock_after_interviews;
+      const clampedCompleted = Math.max(0, Math.min(levelCompleted, levelTotal));
+      return {
+        id: l.level,
+        name: l.name,
+        status: l.level < currentLevel ? 'completed' : l.level === currentLevel ? 'current' : l.level <= accessLevel ? 'locked' : 'locked',
+        completedInterviews: clampedCompleted,
+        requiredInterviews: levelTotal,
+        features: l.features,
+        color: l.color,
+      };
+    });
+
+    const recentInterviews = allCompleted.slice(-10).reverse().map(iv => ({
+      id: iv._id || iv.session_id,
+      sessionId: iv.session_id,
+      interviewNumber: iv.interview_number,
+      blueprintTitle: iv.blueprint_title,
+      score: iv.overall_score,
+      grade: iv.grade,
+      completedAt: iv.completed_at,
+      level: iv.level,
+    }));
+
+    const trends = allCompleted.map(iv => ({
+      score: iv.overall_score,
+      date: iv.completed_at,
+      interviewNumber: iv.interview_number,
+      title: iv.blueprint_title,
+      sessionId: iv.session_id,
+    }));
+
+    return {
+      currentLevel,
+      currentLevelName: currentLevelObj?.name || 'Foundation',
+      placementReadiness: readinessScore,
+      averageScore: Math.round(avgScore * 10) / 10,
+      completedInterviews: completedCount,
+      allowedInterviews: maxInterviews,
+      remainingInterviews: remaining,
+      progressPercentage: progressPct,
+      currentPlan: subscription,
+      nextInterviewAvailable: nextAvailable,
+      levels,
+      recentInterviews,
+      trends,
+      accessLevel,
+      targetCareerGoal: journey.target_career_goal || '',
+    };
+  }
+
+  async _getLockStatus(studentId, journey) {
+    const accessLevel = journey?.journey_access_level || 0;
+    const completedCount = journey?.completed_interviews || 0;
+    const maxInterviews = this._getMaxInterviewsForAccess(accessLevel);
+    const lastInterviewAt = journey?.last_interview_at;
+
+    const gapDays = 0;
+    let nextUnlockAt = null;
+    let allowed = completedCount < maxInterviews;
+
+    if (allowed && lastInterviewAt && gapDays > 0) {
+      const nextTime = new Date(lastInterviewAt).getTime() + gapDays * 24 * 60 * 60 * 1000;
+      if (Date.now() < nextTime) {
+        allowed = false;
+        nextUnlockAt = new Date(nextTime).toISOString();
+      }
+    }
+
+    return {
+      allowed,
+      interviewsUsed: completedCount,
+      interviewsTotal: maxInterviews,
+      remaining: Math.max(0, maxInterviews - completedCount),
+      nextUnlockAt,
+      lastInterviewAt: lastInterviewAt || null,
+      gapDays,
+    };
+  }
+
   async getProgress(studentId) {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
     if (!journey) return null;
