@@ -483,13 +483,15 @@ app.post("/api/answer_video_with_audio", requireAuth, requireModuleAccess('ai_in
   let videoPath = videoFile.path;
   let rawAudioPath = audioFile.path;
 
+  let audioPath;
   try {
-    const transcript = await transcriber.transcribe(rawAudioPath);
+    audioPath = await extractAudio(rawAudioPath);
+    const transcript = await transcriber.transcribe(audioPath);
     const videoMetrics = await hasVideoStream(videoPath) ? await analyzeVideo(videoPath) : lowQualityMetrics();
     const response = await handleAnswer({ sessionId, answer: transcript, user: req.user, videoMetrics });
     res.json({ ...response, transcript });
   } finally {
-    await cleanupFiles([videoPath, rawAudioPath]);
+    await cleanupFiles([videoPath, rawAudioPath, audioPath]);
   }
 }));
 
