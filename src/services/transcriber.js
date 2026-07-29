@@ -6,12 +6,15 @@ import { recordAiUsage } from "./aiUsageService.js";
 
 class GroqWhisperTranscriber {
   constructor() {
-    this.client = config.groqApiKey ? new Groq({ apiKey: config.groqApiKey }) : null;
+    const keys = config.groqApiKeys || [];
+    this.client = keys.length > 0 ? new Groq({ apiKey: keys[0] }) : null;
   }
 
   setApiKey(apiKey) {
-    config.groqApiKey = apiKey;
-    this.client = new Groq({ apiKey });
+    const keys = String(apiKey || '').split(',').map(s => s.trim()).filter(Boolean);
+    config.groqApiKeys = keys;
+    config.groqApiKey = keys[0] || '';
+    this.client = keys.length > 0 ? new Groq({ apiKey: keys[0] }) : null;
   }
 
   getClient() {

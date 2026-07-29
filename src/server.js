@@ -1783,6 +1783,7 @@ async function start() {
     `);
     await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_hr_user ON help_requests (user_id)`);
     await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_hr_status ON help_requests (status)`);
+    await sequelize.query(`ALTER TABLE help_requests ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`);
     console.log('Help requests table ready');
   } catch (_err) {
     console.log('Help requests table migration skipped:', _err.message);
