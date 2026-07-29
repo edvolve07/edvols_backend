@@ -649,4 +649,128 @@ export async function sendAssessmentPublishedEmail({ to, name, assessment, admin
   await deliverEmail({ to, subject, text, html });
 }
 
+export async function sendWelcomeEmail({ to, name, planName, planAmount, discountAmount, totalAmount, invoiceNumber, features, interviewsTotal }) {
+  if (!isEmailServiceConfigured()) return;
+  const clientUrl = process.env.CLIENT_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
+  const logoUrl = `${clientUrl}/edvols%20logo.png`;
+  const safeName = escapeHtml(name || 'there');
+  const safePlan = escapeHtml(planName || 'your chosen');
+  const safeFeatures = Array.isArray(features) ? features : [];
+  const discount = Number(discountAmount) || 0;
+  const total = Number(totalAmount) || Number(planAmount) || 0;
+  const subject = 'Welcome to Edvols – Your Placement Journey Begins!';
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f2f4f6;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f4f6;">
+<tr><td align="center" style="padding:32px 16px;">
+  <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.06);">
+
+    <!-- Header banner -->
+    <tr>
+      <td style="background:linear-gradient(135deg,#064e3b 0%,#047857 50%,#059669 100%);padding:36px 40px 28px;text-align:center;">
+        <img src="${logoUrl}" alt="Edvols" style="width:130px;height:auto;margin-bottom:8px;display:inline-block;" onerror="this.style.display='none'">
+        <p style="color:rgba(255,255,255,0.75);font-size:14px;margin:6px 0 0;letter-spacing:0.3px;">Build your placement-ready profile</p>
+      </td>
+    </tr>
+
+    <!-- Body -->
+    <tr>
+      <td style="padding:32px 40px;">
+        <p style="color:#111827;font-size:22px;font-weight:700;margin:0 0 4px;">Welcome to Edvols, ${safeName}! 🎉</p>
+        <p style="color:#6b7280;font-size:14px;line-height:1.7;margin:0 0 20px;">Thank you for subscribing to the <strong style="color:#059669;">${safePlan}</strong> plan. You now have full access to everything Edvols has to offer.</p>
+
+        <!-- Receipt card -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border:1px solid #e5e7eb;border-radius:12px;">
+          <tr><td style="padding:18px 20px;background:#f9fafb;border-bottom:1px solid #e5e7eb;">
+            <p style="font-size:13px;font-weight:600;color:#6b7280;margin:0;text-transform:uppercase;letter-spacing:0.5px;">Payment Receipt</p>
+          </td></tr>
+          <tr><td style="padding:18px 20px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="padding:4px 0;"><span style="color:#6b7280;font-size:13px;">Plan</span></td>
+                <td align="right"><span style="color:#111827;font-size:13px;font-weight:600;">${safePlan}</span></td>
+              </tr>
+              <tr>
+                <td style="padding:4px 0;"><span style="color:#6b7280;font-size:13px;">Interviews Included</span></td>
+                <td align="right"><span style="color:#111827;font-size:13px;">${Number(interviewsTotal) || '—'}</span></td>
+              </tr>
+              <tr>
+                <td style="padding:4px 0;"><span style="color:#6b7280;font-size:13px;">Plan Price</span></td>
+                <td align="right"><span style="color:#111827;font-size:13px;">₹${Number(planAmount) || 0}</span></td>
+              </tr>
+              ${discount > 0 ? `
+              <tr>
+                <td style="padding:4px 0;"><span style="color:#059669;font-size:13px;">Discount</span></td>
+                <td align="right"><span style="color:#059669;font-size:13px;">-₹${discount}</span></td>
+              </tr>` : ''}
+              <tr>
+                <td style="padding:8px 0 0;border-top:1px solid #e5e7eb;"></td>
+                <td style="padding:8px 0 0;border-top:1px solid #e5e7eb;"></td>
+              </tr>
+              <tr>
+                <td style="padding:4px 0;"><span style="color:#111827;font-size:15px;font-weight:700;">Total Paid</span></td>
+                <td align="right"><span style="color:#059669;font-size:17px;font-weight:700;">₹${total}</span></td>
+              </tr>
+            </table>
+          </td></tr>
+          ${invoiceNumber ? `<tr><td style="padding:0 20px 14px;">
+            <p style="color:#9ca3af;font-size:11px;margin:0;">Invoice #${escapeHtml(String(invoiceNumber))}</p>
+          </td></tr>` : ''}
+        </table>
+
+        <!-- Features -->
+        ${safeFeatures.length > 0 ? `
+        <p style="color:#111827;font-size:15px;font-weight:600;margin:0 0 12px;">What's included:</p>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+          ${safeFeatures.map(f => `
+          <tr>
+            <td style="padding:5px 0;">
+              <table role="presentation" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="vertical-align:middle;padding-right:8px;"><span style="color:#059669;font-size:14px;">✓</span></td>
+                  <td><span style="color:#374151;font-size:13px;">${escapeHtml(f)}</span></td>
+                </tr>
+              </table>
+            </td>
+          </tr>`).join('')}
+        </table>` : ''}
+
+        <!-- CTA -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center" style="padding:0 0 24px;">
+              <a href="${clientUrl}/dashboard"
+                 style="display:inline-block;background:linear-gradient(135deg,#059669,#047857);color:#ffffff;padding:14px 36px;border-radius:10px;font-size:15px;font-weight:700;text-decoration:none;">
+                Go to Dashboard →
+              </a>
+            </td>
+          </tr>
+        </table>
+
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:0 0 20px;">
+
+        <p style="color:#6b7280;font-size:13px;line-height:1.6;margin:0 0 4px;">Need help? Reply to this email or reach out to our support team.</p>
+        <p style="color:#6b7280;font-size:13px;line-height:1.6;margin:0;">Best regards,<br><strong style="color:#111827;">The Edvols Team</strong></p>
+      </td>
+    </tr>
+
+    <!-- Footer -->
+    <tr>
+      <td style="background:#f9fafb;padding:20px 40px;text-align:center;">
+        <p style="color:#9ca3af;font-size:12px;margin:0 0 6px;">Edvols — Placement Readiness Platform</p>
+        <p style="color:#9ca3af;font-size:11px;margin:0;">${clientUrl}</p>
+      </td>
+    </tr>
+
+  </table>
+</td></tr>
+</table>
+</body></html>`;
+
+  await deliverEmail({ to, subject, html });
+  console.log(`[email] Welcome email sent to ${to}`);
+}
+
 export { RESET_TOKEN_TTL_MINUTES };

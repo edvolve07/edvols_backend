@@ -5,6 +5,7 @@ import { getSequelize } from '../database/connection.js';
 import { Subscription, PaymentTransaction, StudentJourney, User, Admin, Student, Plan, ReferralCampaign, IndividualStudent } from '../database/index.js';
 import { config } from '../config.js';
 import { validateReferralCode, applyReferralReward, computeReferralDiscount } from '../referral/service.js';
+import { sendWelcomeEmail } from '../services/emailService.js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
@@ -1084,6 +1085,18 @@ router.post('/guest-verify', asyncHandler(async (req, res) => {
       referral_result = await applyReferralReward(referralCampaign._id, referralCampaign.owner_user_id, user._id, subscription._id);
     } catch (_err) {}
   }
+
+  sendWelcomeEmail({
+    to: user.email,
+    name: user.name,
+    planName: plan.name,
+    planAmount: plan.amount,
+    discountAmount,
+    totalAmount,
+    invoiceNumber,
+    features: plan.features,
+    interviewsTotal: plan.interviews_total,
+  }).catch((_err) => {});
 
   const token = signToken(user);
 
