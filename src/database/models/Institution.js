@@ -49,6 +49,21 @@ export const Institution = sequelize.define('Institution', {
     type: DataTypes.INTEGER,
     defaultValue: 0,
   },
+  basic_price: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: null,
+  },
+  advanced_price: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: null,
+  },
+  professional_price: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: null,
+  },
   created_by: {
     type: DataTypes.UUID,
     allowNull: false,

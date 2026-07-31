@@ -681,15 +681,32 @@ router.post('/upgrade-level', requireAuth, requireRole('individual_student'), as
 }));
 
 router.get('/admin/individual-students', requireAuth, requireRole('master_admin'), asyncHandler(async (req, res) => {
-  const { search, page = 1, limit = 20 } = req.query;
+  const { search, college, page = 1, limit = 20 } = req.query;
+  const { Op, literal } = await import('sequelize');
   const where = { role: 'individual_student' };
   if (search) {
-    const { Op } = await import('sequelize');
+    const esc = String(search).replace(/'/g, "''");
     where[Op.or] = [
-      { name: { [Op.iLike]: `%${search}%` } },
-      { email: { [Op.iLike]: `%${search}%` } },
+      { name: { [Op.iLike]: `%${esc}%` } },
+      { email: { [Op.iLike]: `%${esc}%` } },
+      { phone: { [Op.iLike]: `%${esc}%` } },
+      { college_name: { [Op.iLike]: `%${esc}%` } },
+      { college_address: { [Op.iLike]: `%${esc}%` } },
+      { course_details: { [Op.iLike]: `%${esc}%` } },
+      { stream: { [Op.iLike]: `%${esc}%` } },
+      { interested_role: { [Op.iLike]: `%${esc}%` } },
+      literal(`EXISTS (SELECT 1 FROM subscriptions s WHERE s.student_id::TEXT = "User"."_id"::TEXT AND (s.plan_name ILIKE '%${esc}%' OR s.plan_key ILIKE '%${esc}%' OR s.access_level::TEXT ILIKE '%${esc}%'))`),
+      literal(`EXISTS (SELECT 1 FROM student_journeys j WHERE j.student_id::TEXT = "User"."_id"::TEXT AND (j.current_level::TEXT ILIKE '%${esc}%' OR j.completed_interviews::TEXT ILIKE '%${esc}%'))`),
     ];
   }
+  if (college) {
+    where.college_name = { [Op.iLike]: college };
+  }
+
+  const [collegeRows] = await getSequelize().query(
+    `SELECT DISTINCT college_name FROM users WHERE role = 'individual_student' AND college_name IS NOT NULL AND college_name <> '' ORDER BY college_name`
+  );
+  const colleges = collegeRows.map(r => r.college_name);
 
   const offset = (parseInt(page) - 1) * parseInt(limit);
   const { count, rows: users } = await User.findAndCountAll({
@@ -743,6 +760,11 @@ router.get('/admin/individual-students', requireAuth, requireRole('master_admin'
         phone: u.phone,
         role: u.role,
         is_active: u.is_active,
+        stream: u.stream || '',
+        interested_role: u.interested_role || '',
+        college_name: u.college_name || '',
+        college_address: u.college_address || '',
+        course_details: u.course_details || '',
         subscription_status: profile.subscription_status || 'inactive',
         journey_access: profile.journey_access || 0,
         current_level: profile.current_level || 1,
@@ -768,6 +790,7 @@ router.get('/admin/individual-students', requireAuth, requireRole('master_admin'
     page: parseInt(page),
     limit: parseInt(limit),
     total_pages: Math.ceil(count / parseInt(limit)),
+    colleges,
   });
 }));
 
@@ -890,6 +913,11 @@ function toSafeJSON(user) {
     phone: user.phone || null,
     is_active: user.is_active,
     email_verified: user.email_verified,
+    stream: user.stream || '',
+    interested_role: user.interested_role || '',
+    college_name: user.college_name || '',
+    college_address: user.college_address || '',
+    course_details: user.course_details || '',
   };
 }
 
@@ -970,7 +998,7 @@ router.post('/guest-create-order', asyncHandler(async (req, res) => {
 }));
 
 router.post('/guest-verify', asyncHandler(async (req, res) => {
-  const { plan_key, name, email, password, razorpay_order_id, razorpay_payment_id, razorpay_signature, referral_code } = req.body || {};
+  const { plan_key, name, email, password, razorpay_order_id, razorpay_payment_id, razorpay_signature, referral_code, stream, interested_role, college_name, college_address, course_details } = req.body || {};
   if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
   if (!name || !email || !password) throw new HttpError(400, 'Name, email, and password are required');
 
@@ -1000,6 +1028,11 @@ router.post('/guest-verify', asyncHandler(async (req, res) => {
     email_verified: true,
     must_change_password: false,
     is_active: true,
+    stream: String(stream || '').trim().slice(0, 80),
+    interested_role: String(interested_role || '').trim().slice(0, 80),
+    college_name: String(college_name || '').trim().slice(0, 255),
+    college_address: String(college_address || '').trim().slice(0, 500),
+    course_details: String(course_details || '').trim().slice(0, 255),
   });
 
   await getSequelize().query(
@@ -1077,6 +1110,7 @@ router.post('/guest-verify', asyncHandler(async (req, res) => {
     journey_access_level: plan.access_level,
     current_level: 1,
     status: 'not_started',
+    target_career_goal: user.interested_role || '',
   });
 
   let referral_result = null;

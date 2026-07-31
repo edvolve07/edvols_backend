@@ -50,6 +50,22 @@ export const User = sequelize.define('User', {
     type: DataTypes.STRING(80),
     defaultValue: '',
   },
+  stream: {
+    type: DataTypes.STRING(80),
+    defaultValue: '',
+  },
+  college_name: {
+    type: DataTypes.STRING(255),
+    defaultValue: '',
+  },
+  college_address: {
+    type: DataTypes.STRING(500),
+    defaultValue: '',
+  },
+  course_details: {
+    type: DataTypes.STRING(255),
+    defaultValue: '',
+  },
   profile_headline: {
     type: DataTypes.STRING(120),
     defaultValue: '',

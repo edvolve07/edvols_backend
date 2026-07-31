@@ -49,7 +49,9 @@ import { requireAuth, requireModuleAccess, requireRole } from "./aptitude/middle
 import { formatDisplayName } from "./aptitude/utils/nameFormat.js";
 import { validateFileType } from "./utils/fileValidation.js";
 import { buildUserContext } from "./aptitude/utils/userContext.js";
-import { Op, User, StudentJourney, InterviewSession, InterviewReport, AptitudeQuestion, AptitudeResult, getSequelize, syncDatabase } from "./database/index.js";
+import { Op, User, StudentJourney, JourneyInterview, InterviewSession, InterviewReport, AptitudeQuestion, AptitudeResult, getSequelize, syncDatabase } from "./database/index.js";
+import { getBlueprintByNumber, BLUEPRINTS, LEVELS } from "./mentorship/blueprints.js";
+import { journeyService } from "./mentorship/journeyService.js";
 
 const app = express();
 const upload = multer({
@@ -133,6 +135,33 @@ function assertCanAccessSession(user, session) {
   }
 }
 
+function maxInterviewsForAccess(accessLevel) {
+  let max = 0;
+  for (const level of LEVELS) {
+    if (level.level <= accessLevel) {
+      max = level.interview_range[1];
+    }
+  }
+  return max || BLUEPRINTS.length;
+}
+
+async function getNextInterviewNumber(studentId) {
+  let completed = 0;
+  let accessibleTotal = BLUEPRINTS.length;
+  try {
+    const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+    completed = journey?.completed_interviews || 0;
+    accessibleTotal = maxInterviewsForAccess(journey?.journey_access_level || 0);
+    const count = await JourneyInterview.count({
+      where: { student_id: studentId, status: "completed" }
+    });
+    completed = Math.max(completed, count || 0);
+  } catch (err) {
+    console.log("Next interview number lookup skipped:", err.message);
+  }
+  return Math.min(completed + 1, accessibleTotal);
+}
+
 async function updateSessionAtomic(sessionId, update) {
   const [affected] = await InterviewSession.update(update, { where: { session_id: sessionId } });
   if (affected === 0) {
@@ -148,7 +177,17 @@ async function handleAnswer({ sessionId, answer, user, videoMetrics = null }) {
     throw new HttpError(400, "Interview completed");
   }
 
-  const evaluation = await aiService.evaluateAnswer(session.current_question, answer, videoMetrics);
+  const blueprint = session.interview_number ? getBlueprintByNumber(session.interview_number) : null;
+  const studentContext = {
+    stream: "",
+    target_role: "",
+    domain: session.domain,
+    role: session.role,
+  };
+
+  const evaluation = blueprint
+    ? await aiService.evaluateBlueprintAnswer(session.current_question, answer, blueprint, videoMetrics, studentContext)
+    : await aiService.evaluateAnswer(session.current_question, answer, videoMetrics);
   const historyEntry = {
     question_number: session.question_count,
     question: session.current_question,
@@ -162,13 +201,14 @@ async function handleAnswer({ sessionId, answer, user, videoMetrics = null }) {
   }
 
   const updatedHistory = [...(session.history || []), historyEntry];
+  const isLast = session.question_count >= config.maxQuestions;
 
-  if (session.question_count >= config.maxQuestions) {
-    await updateSessionAtomic(sessionId, {
-      history: updatedHistory,
-      status: "completed"
-    });
+  await updateSessionAtomic(sessionId, {
+    history: updatedHistory,
+    ...(isLast ? { status: "completed" } : {}),
+  });
 
+  if (isLast) {
     return {
       completed: true,
       message: "Interview completed. Call /api/end",
@@ -177,15 +217,27 @@ async function handleAnswer({ sessionId, answer, user, videoMetrics = null }) {
     };
   }
 
-  const nextQuestion = await aiService.generateNextQuestion(
-    session.resume_text,
-    updatedHistory,
-    session.domain,
-    session.role
-  );
+  let nextQuestion = "";
+  try {
+    nextQuestion = blueprint
+      ? await aiService.generateBlueprintNextQuestion(session.resume_text, updatedHistory, blueprint, studentContext)
+      : await aiService.generateNextQuestion(
+          session.resume_text,
+          updatedHistory,
+          session.domain,
+          session.role
+        );
+  } catch (err) {
+    console.error("Failed to generate next question:", err.message);
+  }
+  if (!nextQuestion) {
+    const last = updatedHistory[updatedHistory.length - 1];
+    nextQuestion = last?.question
+      ? "Let's go deeper on that — could you elaborate on your last answer with a concrete example?"
+      : "Tell me more about an experience that helped you build the relevant skills for this role.";
+  }
 
   await updateSessionAtomic(sessionId, {
-    history: updatedHistory,
     current_question: nextQuestion,
     question_count: session.question_count + 1
   });
@@ -394,7 +446,24 @@ app.post("/api/start", requireAuth, requireModuleAccess('ai_interview'), upload.
   }
 
   const ats = await aiService.analyzeResume(resumeText);
-  const firstQuestion = await aiService.generateFirstQuestion(resumeText, domain, role);
+  const interviewNumber = await getNextInterviewNumber(req.user._id);
+  const blueprint = getBlueprintByNumber(interviewNumber) || BLUEPRINTS[0];
+
+  const studentContext = {
+    stream: req.user?.stream || "",
+    target_role: req.user?.interested_role || "",
+    domain,
+    role,
+  };
+
+  let firstQuestion = "";
+  try {
+    firstQuestion = await aiService.generateBlueprintFirstQuestion(resumeText, blueprint, studentContext);
+  } catch (err) {
+    console.error("Blueprint first question failed, falling back:", err.message);
+    firstQuestion = await aiService.generateFirstQuestion(resumeText, domain, role);
+  }
+
   const sessionId = uuidv4();
 
   const session = {
@@ -410,7 +479,11 @@ app.post("/api/start", requireAuth, requireModuleAccess('ai_interview'), upload.
     history: [],
     current_question: firstQuestion,
     question_count: 1,
+    max_questions: config.maxQuestions,
     status: "active",
+    interview_number: interviewNumber,
+    blueprint_title: blueprint.title,
+    blueprint_level: blueprint.level,
   };
 
   await InterviewSession.create(session);
@@ -419,9 +492,13 @@ app.post("/api/start", requireAuth, requireModuleAccess('ai_interview'), upload.
     session_id: sessionId,
     question: firstQuestion,
     question_number: 1,
+    max_questions: config.maxQuestions,
     ats_score: ats.ats_score,
     skills_found: (ats.skills_found || []).slice(0, 5),
-    improvements: (ats.improvements || []).slice(0, 3)
+    improvements: (ats.improvements || []).slice(0, 3),
+    interview_number: interviewNumber,
+    blueprint_title: blueprint.title,
+    blueprint_level: blueprint.level
   });
 }));
 
@@ -505,9 +582,13 @@ app.get("/api/session/:session_id", requireAuth, requireModuleAccess('ai_intervi
     session_id: session.session_id,
     question: session.current_question || "",
     question_number: session.question_count || 1,
+    max_questions: session.max_questions ?? config.maxQuestions,
     status: session.status,
     domain: session.domain,
     role: session.role,
+    interview_number: session.interview_number,
+    blueprint_title: session.blueprint_title,
+    blueprint_level: session.blueprint_level,
     ats_score: session.ats_analysis?.ats_score,
     skills_found: (session.ats_analysis?.skills_found || []).slice(0, 5),
     improvements: (session.ats_analysis?.improvements || []).slice(0, 3),
@@ -604,6 +685,8 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
     student_email: session.student_email || req.user.email || "",
     interview_domain: session.domain,
     interview_role: session.role,
+    blueprint_title: session.blueprint_title || "",
+    blueprint_level: session.blueprint_level || 0,
     report_id: reportId,
     generated_date: new Date().toLocaleDateString("en-US", {
       weekday: "long",
@@ -645,21 +728,27 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
       { replacements: { sid: sessionId } }
     );
     if (!existingJI) {
-      const [[jiCount]] = await getSequelize().query(
-        `SELECT COALESCE(MAX(interview_number), 0) AS max_num FROM journey_interviews WHERE student_id = :sid`,
-        { replacements: { sid: studentId } }
-      );
-      const nextNum = (jiCount?.max_num || 0) + 1;
+      let nextNum = session.interview_number || 0;
+      if (!nextNum) {
+        const [[jiCount]] = await getSequelize().query(
+          `SELECT COALESCE(MAX(interview_number), 0) AS max_num FROM journey_interviews WHERE student_id = :sid`,
+          { replacements: { sid: studentId } }
+        );
+        nextNum = (jiCount?.max_num || 0) + 1;
+      }
       const role = session.role || '';
       const domain = session.domain || '';
+      const title = session.blueprint_title || ((role || 'Interview') + ' - ' + (domain || ''));
+      const level = session.blueprint_level || 1;
       await getSequelize().query(`
         INSERT INTO journey_interviews (_id, student_id, interview_number, blueprint_title, level, status, session_id, report_id, overall_score, grade, started_at, completed_at, level_at_time, created_at, updated_at)
-        VALUES (gen_random_uuid(), :sid, :num, :title, 1, 'completed', :sessionId, :reportId, :score, :grade, :started, :completed, 1, NOW(), NOW())
+        VALUES (gen_random_uuid(), :sid, :num, :title, :level, 'completed', :sessionId, :reportId, :score, :grade, :started, :completed, :level, NOW(), NOW())
       `, {
         replacements: {
           sid: studentId,
           num: nextNum,
-          title: (role || 'Interview') + ' - ' + (domain || ''),
+          title,
+          level,
           sessionId,
           reportId: report.report_id,
           score: percentage,
@@ -1257,6 +1346,10 @@ async function start() {
   try {
     await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active'`);
     await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_admin UUID DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS stream VARCHAR(80) DEFAULT ''`);
+    await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS college_name VARCHAR(255) DEFAULT ''`);
+    await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS college_address VARCHAR(500) DEFAULT ''`);
+    await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS course_details VARCHAR(255) DEFAULT ''`);
     console.log('Users table columns updated');
   } catch (_err) {
     console.log('Users table column migration skipped:', _err.message);
@@ -1607,6 +1700,16 @@ async function start() {
     console.log('interview_gap_days migration skipped:', _err.message);
   }
 
+  // ── Phase 4b: Per-institution negotiated plan pricing ──────────────────
+  try {
+    await sequelize.query(`ALTER TABLE institutions ADD COLUMN IF NOT EXISTS basic_price INTEGER DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE institutions ADD COLUMN IF NOT EXISTS advanced_price INTEGER DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE institutions ADD COLUMN IF NOT EXISTS professional_price INTEGER DEFAULT NULL`);
+    console.log('Institutions negotiated pricing columns ready');
+  } catch (_err) {
+    console.log('negotiated pricing migration skipped:', _err.message);
+  }
+
   // ── Phase 5: Ensure student_journeys has all columns ──────────────────
   try {
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS student_name VARCHAR(255) DEFAULT ''`);
@@ -1649,7 +1752,11 @@ async function start() {
     await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS history JSONB DEFAULT '[]'`);
     await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS current_question JSONB DEFAULT NULL`);
     await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS question_count INTEGER DEFAULT 1`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS max_questions INTEGER DEFAULT NULL`);
     await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active'`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS interview_number INTEGER DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS blueprint_title VARCHAR(255) DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE interview_sessions ADD COLUMN IF NOT EXISTS blueprint_level INTEGER DEFAULT NULL`);
     console.log('InterviewSession columns ready');
   } catch (_err) {
     console.log('InterviewSession migration skipped:', _err.message);
@@ -1661,6 +1768,8 @@ async function start() {
     await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS strengths JSONB DEFAULT '[]'`);
     await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS areas_to_improve JSONB DEFAULT '[]'`);
     await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS interview_tips JSONB DEFAULT '[]'`);
+    await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS blueprint_title VARCHAR(255) DEFAULT NULL`);
+    await sequelize.query(`ALTER TABLE interview_reports ADD COLUMN IF NOT EXISTS blueprint_level INTEGER DEFAULT NULL`);
     console.log('InterviewReport columns ready');
   } catch (_err) {
     console.log('InterviewReport migration skipped:', _err.message);

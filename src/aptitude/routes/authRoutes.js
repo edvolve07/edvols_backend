@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { requireAuth } from '../middleware/auth.js';
-import { User, Op } from '../../database/index.js';
+import { User, Op, StudentJourney } from '../../database/index.js';
 import { findUserByEmail, findUserByPk } from '../utils/userUtils.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { HttpError, badRequest, locked, unauthorized } from '../utils/httpError.js';
@@ -26,6 +26,10 @@ function toSafeJSON(user) {
     phone: user.phone || '',
     organization: user.organization || '',
     interested_role: user.interested_role || '',
+    stream: user.stream || '',
+    college_name: user.college_name || '',
+    college_address: user.college_address || '',
+    course_details: user.course_details || '',
     profile_headline: user.profile_headline || '',
     profile_bio: user.profile_bio || '',
     location: user.location || '',
@@ -137,7 +141,7 @@ router.post(
 router.post(
   '/individual-signup',
   asyncHandler(async (req, res) => {
-    const { name, email, password, confirmPassword, plan_key } = req.body;
+    const { name, email, password, confirmPassword, plan_key, stream, interested_role, college_name, college_address, course_details } = req.body;
     const errors = [];
 
     if (!name || name.trim().length < 2) errors.push('Full name is required');
@@ -160,6 +164,11 @@ router.post(
       email_verified: true,
       must_change_password: false,
       is_active: true,
+      stream: String(stream || '').trim().slice(0, 80),
+      interested_role: String(interested_role || '').trim().slice(0, 80),
+      college_name: String(college_name || '').trim().slice(0, 255),
+      college_address: String(college_address || '').trim().slice(0, 500),
+      course_details: String(course_details || '').trim().slice(0, 255),
     });
 
     const { getSequelize } = await import('../../database/index.js');
@@ -317,6 +326,10 @@ router.put(
     const phone = cleanProfileField(req.body.phone, 20);
     const organization = cleanProfileField(req.body.organization, 120);
     const interestedRole = cleanProfileField(req.body.interested_role, 80);
+    const stream = cleanProfileField(req.body.stream, 80);
+    const collegeName = cleanProfileField(req.body.college_name, 255);
+    const collegeAddress = cleanProfileField(req.body.college_address, 500);
+    const courseDetails = cleanProfileField(req.body.course_details, 255);
     const profileHeadline = cleanProfileField(req.body.profile_headline, 120);
     const profileBio = cleanProfileField(req.body.profile_bio, 500);
     const location = cleanProfileField(req.body.location, 80);
@@ -340,6 +353,10 @@ router.put(
     user.phone = phone;
     user.organization = organization;
     user.interested_role = interestedRole;
+    user.stream = stream;
+    user.college_name = collegeName;
+    user.college_address = collegeAddress;
+    user.course_details = courseDetails;
     user.profile_headline = profileHeadline;
     user.profile_bio = profileBio;
     user.location = location;
@@ -349,6 +366,35 @@ router.put(
 
     res.json({
       message: 'Profile updated successfully.',
+      user: toSafeJSON(updated),
+    });
+  }),
+);
+
+router.patch(
+  '/profile/targeting',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const stream = cleanProfileField(req.body.stream, 80);
+    const interestedRole = cleanProfileField(req.body.interested_role, 80);
+    if (!stream && !interestedRole) throw badRequest('Stream or target role is required');
+
+    const user = await User.findByPk(req.user._id);
+    if (!user) throw unauthorized('User not found');
+
+    if (req.body.stream !== undefined) user.stream = stream;
+    if (req.body.interested_role !== undefined) user.interested_role = interestedRole;
+    await user.save();
+
+    await StudentJourney.update(
+      { target_career_goal: user.interested_role },
+      { where: { student_id: user._id } },
+    );
+
+    const updated = await import('../utils/userContext.js').then(m => m.buildUserContext(user._id));
+
+    res.json({
+      message: 'Targeting preferences updated successfully.',
       user: toSafeJSON(updated),
     });
   }),

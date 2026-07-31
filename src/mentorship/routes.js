@@ -10,7 +10,7 @@ import { InterviewReport, InterviewSession, JourneyInterview, StudentJourney, Us
 import { buildStudentWhere } from '../aptitude/utils/adminScope.js';
 import { extractTextFromPdf } from '../services/resumeParser.js';
 import { aiService } from '../services/aiService.js';
-import { getBlueprintByNumber } from './blueprints.js';
+import { getBlueprintByNumber, BLUEPRINTS, LEVELS } from './blueprints.js';
 import fs from 'fs/promises';
 
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 5 * 1024 * 1024 } });
@@ -27,7 +27,37 @@ function getStudentInfo(req) {
     name: req.user?.name || '',
     email: req.user?.email || '',
     institutionId: req.user?.institutionId || null,
+    stream: req.user?.stream || '',
+    interestedRole: req.user?.interested_role || '',
   };
+}
+
+async function generateFirstQuestion(resumeText, blueprint, studentContext) {
+  let question = '';
+  if (blueprint && resumeText) {
+    try {
+      question = await aiService.generateBlueprintFirstQuestion(resumeText, blueprint, studentContext);
+    } catch (err) {
+      console.error('Failed to generate first blueprint question:', err.message);
+    }
+  }
+  if (!question) {
+    try {
+      question = await aiService.generateFirstQuestion(
+        resumeText || 'the candidate did not provide a resume',
+        studentContext.stream || 'General',
+        studentContext.target_role || 'Software Engineer',
+      );
+    } catch (err) {
+      console.error('Fallback first question also failed:', err.message);
+    }
+  }
+  if (!question) {
+    const topic = blueprint?.objective || blueprint?.title || '';
+    const prefix = topic ? `We're starting an interview focused on ${topic.toLowerCase()}. ` : '';
+    question = `${prefix}To begin, tell me about your background and the experiences most relevant to this interview.`;
+  }
+  return question;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -54,11 +84,58 @@ router.get('/journey/interviews', requireAuth, asyncHandler(async (req, res) => 
   res.json({ interviews });
 }));
 
+router.get('/interview/next', requireAuth, asyncHandler(async (req, res) => {
+  const studentId = getStudentId(req);
+  const info = getStudentInfo(req);
+
+  try {
+    await journeyService.getOrCreateJourney(studentId, info.name, info.email, info.institutionId);
+  } catch (err) {
+    console.log('Next-interview journey setup skipped:', err.message);
+  }
+
+  const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+  let completedCount = journey?.completed_interviews || 0;
+
+  try {
+    const { count } = await JourneyInterview.findAndCountAll({
+      where: { student_id: studentId, status: 'completed' },
+    });
+    completedCount = Math.max(completedCount, count || 0);
+  } catch (err) {
+    console.log('Next-interview count skipped:', err.message);
+  }
+
+  const accessLevel = journey?.journey_access_level || 0;
+  let accessibleTotal = 0;
+  for (const level of LEVELS) {
+    if (level.level <= accessLevel) {
+      accessibleTotal = level.interview_range[1];
+    }
+  }
+  if (accessibleTotal < 1) accessibleTotal = BLUEPRINTS.length;
+
+  const interviewNumber = Math.min(completedCount + 1, accessibleTotal);
+  const blueprint = getBlueprintByNumber(interviewNumber) || BLUEPRINTS[0];
+
+  res.json({
+    interview_number: interviewNumber,
+    title: blueprint.title,
+    level: blueprint.level,
+    difficulty: blueprint.difficulty,
+    objective: blueprint.objective,
+    focus_areas: blueprint.focus_areas,
+    completed_interviews: completedCount,
+    total_interviews: accessibleTotal,
+    all_completed: completedCount >= accessibleTotal,
+  });
+}));
+
 router.get('/placement-progress', requireAuth, asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
   const info = getStudentInfo(req);
   await journeyService.getOrCreateJourney(studentId, info.name, info.email, info.institutionId);
-  const data = await journeyService.getPlacementProgress(studentId);
+  const data = await journeyService.getPlacementProgress(studentId, info);
   res.json(data);
 }));
 
@@ -143,14 +220,9 @@ router.post('/interview/start', requireAuth, upload.single('resume'), asyncHandl
   }
 
   const blueprint = getBlueprintByNumber(result.interview_number);
-  let firstQuestion = '';
-  if (blueprint && resumeText) {
-    try {
-      firstQuestion = await aiService.generateBlueprintFirstQuestion(resumeText, blueprint);
-    } catch (err) {
-      console.error('Failed to generate first blueprint question:', err.message);
-    }
-  }
+  const studentContext = { stream: req.user?.stream || '', target_role: req.user?.interested_role || '' };
+  const firstQuestion = await generateFirstQuestion(resumeText, blueprint, studentContext);
+  const maxQuestions = Number(process.env.MAX_QUESTIONS || 10);
 
   await InterviewSession.create({
     session_id: result.session_id,
@@ -158,17 +230,18 @@ router.post('/interview/start', requireAuth, upload.single('resume'), asyncHandl
     student_name: info.name || '',
     student_email: info.email || '',
     student_role: req.user?.role || 'student',
-    domain: blueprint?.domain || 'General',
-    role: blueprint?.role || 'Software Engineer',
+    domain: studentContext.stream || blueprint?.domain || 'General',
+    role: studentContext.target_role || blueprint?.role || 'Software Engineer',
     resume_text: resumeText,
     ats_analysis: null,
     history: [],
     current_question: firstQuestion,
     question_count: 1,
+    max_questions: maxQuestions,
     status: 'active',
   });
 
-  res.json({ ...result, question: firstQuestion, question_number: 1 });
+  res.json({ ...result, question: firstQuestion, question_number: 1, max_questions: maxQuestions });
 }));
 
 router.post('/interview/start/:interviewNumber', requireAuth, upload.single('resume'), asyncHandler(async (req, res) => {
@@ -196,14 +269,9 @@ router.post('/interview/start/:interviewNumber', requireAuth, upload.single('res
   }
 
   const blueprint = getBlueprintByNumber(interviewNumber);
-  let firstQuestion = '';
-  if (blueprint && resumeText) {
-    try {
-      firstQuestion = await aiService.generateBlueprintFirstQuestion(resumeText, blueprint);
-    } catch (err) {
-      console.error('Failed to generate first blueprint question:', err.message);
-    }
-  }
+  const studentContext = { stream: req.user?.stream || '', target_role: req.user?.interested_role || '' };
+  const firstQuestion = await generateFirstQuestion(resumeText, blueprint, studentContext);
+  const maxQuestions = Number(process.env.MAX_QUESTIONS || 10);
 
   const existingSession = await InterviewSession.findOne({ where: { session_id: result.session_id } });
   if (!existingSession) {
@@ -213,20 +281,21 @@ router.post('/interview/start/:interviewNumber', requireAuth, upload.single('res
       student_name: req.user?.name || '',
       student_email: req.user?.email || '',
       student_role: req.user?.role || 'student',
-      domain: blueprint?.domain || 'General',
-      role: blueprint?.role || 'Software Engineer',
+      domain: studentContext.stream || blueprint?.domain || 'General',
+      role: studentContext.target_role || blueprint?.role || 'Software Engineer',
       resume_text: resumeText,
       ats_analysis: null,
       history: [],
       current_question: firstQuestion,
       question_count: 1,
+      max_questions: maxQuestions,
       status: 'active',
     });
   } else if (resumeText) {
     await existingSession.update({ resume_text: resumeText, current_question: firstQuestion || existingSession.current_question });
   }
 
-  res.json({ ...result, question: firstQuestion, question_number: 1 });
+  res.json({ ...result, question: firstQuestion, question_number: 1, max_questions: maxQuestions });
 }));
 
 router.get('/interview/blueprint/:sessionId', requireAuth, asyncHandler(async (req, res) => {
@@ -253,7 +322,8 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   const blueprint = getBlueprintByNumber(journeyInt.interview_number);
   if (!blueprint) throw new HttpError(500, 'Blueprint not found');
 
-  const evaluation = await aiService.evaluateBlueprintAnswer(session.current_question, answer, blueprint);
+  const studentContext = { stream: req.user?.stream || '', target_role: req.user?.interested_role || '' };
+  const evaluation = await aiService.evaluateBlueprintAnswer(session.current_question, answer, blueprint, null, studentContext);
 
   const historyEntry = {
     question_number: session.question_count,
@@ -264,9 +334,14 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   };
   const updatedHistory = [...(session.history || []), historyEntry];
   const maxQuestions = Number(process.env.MAX_QUESTIONS || 10);
+  const isLast = session.question_count >= maxQuestions;
 
-  if (session.question_count >= maxQuestions) {
-    await session.update({ history: updatedHistory, status: 'completed' });
+  await session.update({
+    history: updatedHistory,
+    ...(isLast ? { status: 'completed' } : {}),
+  });
+
+  if (isLast) {
     return res.json({
       completed: true,
       feedback: evaluation.feedback || '',
@@ -281,18 +356,30 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   }
 
   const resumeText = session.resume_text || '';
-  const nextQuestion = await aiService.generateBlueprintNextQuestion(resumeText, updatedHistory, blueprint);
+  let nextQuestion = '';
+  try {
+    nextQuestion = await aiService.generateBlueprintNextQuestion(resumeText, updatedHistory, blueprint, studentContext);
+  } catch (err) {
+    console.error('Failed to generate next blueprint question:', err.message);
+  }
+  if (!nextQuestion) {
+    const last = updatedHistory[updatedHistory.length - 1];
+    nextQuestion = last?.question
+      ? `Let's go deeper on that — could you elaborate on your last answer with a concrete example?`
+      : 'Tell me more about an experience that helped you build the relevant skills for this role.';
+  }
+
+  const nextQuestionNumber = session.question_count + 1;
 
   await session.update({
-    history: updatedHistory,
     current_question: nextQuestion,
-    question_count: session.question_count + 1,
+    question_count: nextQuestionNumber,
   });
 
   return res.json({
     completed: false,
     next_question: nextQuestion,
-    question_number: session.question_count + 1,
+    question_number: nextQuestionNumber,
     feedback: evaluation.feedback || '',
     metrics: Object.fromEntries(
       ['confidence', 'body_language', 'knowledge', 'fluency', 'skill_relevance']
@@ -338,8 +425,8 @@ router.post('/interview/end', requireAuth, asyncHandler(async (req, res) => {
   const reportData = {
     session_id: sessionId,
     student_id: studentId,
-    interview_role: blueprint?.role || session.role || '',
-    interview_domain: blueprint?.domain || session.domain || '',
+    interview_role: session.role || blueprint?.role || '',
+    interview_domain: session.domain || blueprint?.domain || '',
     blueprint_title: blueprint?.title || '',
     blueprint_level: blueprint?.level || 0,
     overall: {

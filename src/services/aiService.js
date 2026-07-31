@@ -492,13 +492,32 @@ Return ONLY valid JSON:
     }
   }
 
-  async generateBlueprintFirstQuestion(resumeText, blueprint) {
+  buildStudentContext(studentContext) {
+    const stream = studentContext?.stream || '';
+    const targetRole = studentContext?.target_role || studentContext?.interested_role || '';
+    const domain = studentContext?.domain || '';
+    const role = studentContext?.role || '';
+    if (!stream && !targetRole && !domain && !role) return '';
+
+    return `Candidate Profile:
+- Stream/Discipline: ${stream || 'Not specified'}
+- Target Role: ${targetRole || 'Not specified'}
+- Chosen Interview Domain: ${domain || 'Not specified'}
+- Chosen Target Role: ${role || 'Not specified'}
+
+IMPORTANT: Adapt this interview to the candidate's stream, chosen domain, and target role. Do not assume a software engineering background. Tailor every question and evaluation to their specific field and the role they are applying for.`;
+  }
+
+  async generateBlueprintFirstQuestion(resumeText, blueprint, studentContext) {
+    const context = this.buildStudentContext(studentContext);
     const prompt = `${blueprint.ai_prompt}
 
 Candidate Resume:
 ${resumeText.slice(0, 1500)}
 
-Based on the resume and the interview objective above, ask the FIRST question for this interview.
+${context}
+
+Based on the resume, the candidate's profile, and the interview objective above, ask the FIRST question for this interview.
 
 Return ONLY the question text:`;
 
@@ -510,15 +529,19 @@ Return ONLY the question text:`;
     }
   }
 
-  async generateBlueprintNextQuestion(resumeText, history, blueprint) {
+  async generateBlueprintNextQuestion(resumeText, history, blueprint, studentContext) {
     const conversation = history.slice(-5).map((turn) => {
       return `Q: ${turn.question}\nA: ${(turn.answer || "").slice(0, 300)}\n`;
     }).join("\n");
+
+    const context = this.buildStudentContext(studentContext);
 
     const prompt = `${blueprint.ai_prompt}
 
 Candidate Resume:
 ${resumeText.slice(0, 1500)}
+
+${context}
 
 Conversation history:
 ${conversation}
@@ -535,7 +558,7 @@ Return ONLY the question text:`;
     }
   }
 
-  async evaluateBlueprintAnswer(question, answer, blueprint, videoMetrics = null) {
+  async evaluateBlueprintAnswer(question, answer, blueprint, videoMetrics = null, studentContext) {
     const videoSection = videoMetrics?.quality_flag === "good"
       ? `Video Analysis:
 - Eye contact: ${(Number(videoMetrics.eye_contact || 0) * 10).toFixed(1)}/10
@@ -547,6 +570,8 @@ Return ONLY the question text:`;
       .map(([key, desc]) => `- ${key}: ${desc}`)
       .join('\n');
 
+    const context = this.buildStudentContext(studentContext);
+
     const prompt = `You are evaluating a candidate's response in a structured placement interview.
 
 Interview: ${blueprint.title} (Level ${blueprint.level})
@@ -554,6 +579,8 @@ Objective: ${blueprint.objective}
 
 Evaluation Criteria:
 ${criteria}
+
+${context}
 
 QUESTION:
 ${question}

@@ -44,6 +44,11 @@ function serializeInstitution(inst) {
     modules: inst.modules || { aptitude: true, coding: true, interviews: true, resumeBuilder: false, certificates: true },
     status: inst.status,
     interview_gap_days: inst.interview_gap_days || 0,
+    pricing: {
+      basic_price: inst.basic_price ?? null,
+      advanced_price: inst.advanced_price ?? null,
+      professional_price: inst.professional_price ?? null,
+    },
     created_by: inst.created_by || null,
     created_at: inst.created_at,
     updated_at: inst.updated_at,
@@ -211,6 +216,16 @@ router.patch(
     if (address !== undefined) institution.address = address;
     if (status && ['active', 'inactive'].includes(status)) institution.status = status;
     if (interview_gap_days !== undefined) institution.interview_gap_days = interview_gap_days;
+
+    for (const key of ['basic_price', 'advanced_price', 'professional_price']) {
+      if (req.body[key] === undefined) continue;
+      const raw = req.body[key];
+      const parsed = raw === null || raw === '' ? null : parseInt(raw, 10);
+      if (parsed !== null && (!Number.isInteger(parsed) || parsed < 0)) {
+        throw badRequest(`${key} must be a positive number or blank to use the default`);
+      }
+      institution[key] = parsed;
+    }
 
     const modulesUpdate = parseModules(req.body);
     if (modulesUpdate) {
@@ -441,6 +456,411 @@ router.delete(
 
     await department.destroy();
     res.status(204).end();
+  }),
+);
+
+function roundAvg(v) {
+  if (v == null) return null;
+  return Math.round(Number(v) * 10) / 10;
+}
+
+function avgOf(arr) {
+  const nums = (arr || []).filter((v) => v != null);
+  if (!nums.length) return null;
+  return Math.round((nums.reduce((s, v) => s + Number(v), 0) / nums.length) * 10) / 10;
+}
+
+router.get(
+  '/analytics/overview',
+  asyncHandler(async (req, res) => {
+    const institutions = await Institution.findAll({ order: [['name', 'ASC']], raw: true });
+
+    const [userAgg] = await sequelize.query(
+      `SELECT u."institutionId" AS inst_id, u.role, COUNT(*) AS cnt
+       FROM users u
+       WHERE u."institutionId" IS NOT NULL AND u.role IN ('student', 'admin')
+       GROUP BY u."institutionId", u.role`
+    );
+
+    const [deptAgg] = await sequelize.query(
+      `SELECT institution_id, COUNT(*) AS cnt FROM departments GROUP BY institution_id`
+    );
+
+    const [revenueAgg] = await sequelize.query(
+      `SELECT u."institutionId" AS inst_id,
+              COUNT(DISTINCT u._id) AS paid_students,
+              COALESCE(SUM(s.amount_paid), 0) AS revenue
+       FROM users u
+       LEFT JOIN subscriptions s ON s.student_id::text = u._id::text AND s.status <> 'cancelled'
+       WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
+       GROUP BY u."institutionId"`
+    );
+
+    const [aptAgg] = await sequelize.query(
+      `SELECT u."institutionId" AS inst_id, AVG(a.percentage) AS avg_score
+       FROM assessment_attempts a
+       JOIN users u ON u._id::text = a.student_id::text
+       WHERE a.status = 'submitted' AND u."institutionId" IS NOT NULL
+       GROUP BY u."institutionId"`
+    );
+
+    const [intAgg] = await sequelize.query(
+      `SELECT u."institutionId" AS inst_id, COUNT(*) AS cnt, AVG(ji.overall_score) AS avg_score
+       FROM journey_interviews ji
+       JOIN users u ON u._id::text = ji.student_id
+       WHERE ji.status = 'completed' AND u."institutionId" IS NOT NULL
+       GROUP BY u."institutionId"`
+    );
+
+    const [readAgg] = await sequelize.query(
+      `SELECT u."institutionId" AS inst_id, AVG(sj.readiness_score) AS avg_score
+       FROM student_journeys sj
+       JOIN users u ON u._id::text = sj.student_id
+       WHERE sj.readiness_score IS NOT NULL AND u."institutionId" IS NOT NULL
+       GROUP BY u."institutionId"`
+    );
+
+    const institutionsList = institutions.map((inst) => {
+      const id = String(inst._id);
+      const users = userAgg.filter((r) => String(r.inst_id) === id);
+      const revRow = revenueAgg.find((r) => String(r.inst_id) === id);
+      return {
+        key: `institution:${id}`,
+        type: 'institution',
+        id,
+        name: inst.name,
+        code: inst.code || '',
+        status: inst.status,
+        admins: Number(users.find((r) => r.role === 'admin')?.cnt || 0),
+        student_count: Number(users.find((r) => r.role === 'student')?.cnt || 0),
+        branch_count: Number(deptAgg.find((r) => String(r.institution_id) === id)?.cnt || 0),
+        paid_students: Number(revRow?.paid_students || 0),
+        revenue: Number(revRow?.revenue || 0),
+        avg_aptitude: roundAvg(aptAgg.find((r) => String(r.inst_id) === id)?.avg_score),
+        avg_interview: roundAvg(intAgg.find((r) => String(r.inst_id) === id)?.avg_score),
+        avg_readiness: roundAvg(readAgg.find((r) => String(r.inst_id) === id)?.avg_score),
+        completed_interviews: Number(intAgg.find((r) => String(r.inst_id) === id)?.cnt || 0),
+      };
+    });
+
+    const [selfAgg] = await sequelize.query(
+      `SELECT u.college_name AS name,
+              COUNT(*) AS students,
+              COUNT(DISTINCT u._id) AS paid_students,
+              COALESCE(SUM(s.amount_paid), 0) AS revenue
+       FROM users u
+       LEFT JOIN subscriptions s ON s.student_id::text = u._id::text AND s.status <> 'cancelled'
+       WHERE u.role = 'individual_student' AND u.college_name IS NOT NULL AND u.college_name <> ''
+       GROUP BY u.college_name`
+    );
+    const [selfApt] = await sequelize.query(
+      `SELECT u.college_name AS name, AVG(a.percentage) AS avg_score
+       FROM assessment_attempts a
+       JOIN users u ON u._id::text = a.student_id::text
+       WHERE a.status = 'submitted' AND u.role = 'individual_student'
+         AND u.college_name IS NOT NULL AND u.college_name <> ''
+       GROUP BY u.college_name`
+    );
+    const [selfInt] = await sequelize.query(
+      `SELECT u.college_name AS name, COUNT(*) AS cnt, AVG(ji.overall_score) AS avg_score
+       FROM journey_interviews ji
+       JOIN users u ON u._id::text = ji.student_id
+       WHERE ji.status = 'completed' AND u.role = 'individual_student'
+         AND u.college_name IS NOT NULL AND u.college_name <> ''
+       GROUP BY u.college_name`
+    );
+    const [selfRead] = await sequelize.query(
+      `SELECT u.college_name AS name, AVG(sj.readiness_score) AS avg_score
+       FROM student_journeys sj
+       JOIN users u ON u._id::text = sj.student_id
+       WHERE sj.readiness_score IS NOT NULL AND u.role = 'individual_student'
+         AND u.college_name IS NOT NULL AND u.college_name <> ''
+       GROUP BY u.college_name`
+    );
+
+    const selfPayList = selfAgg
+      .filter((r) => Number(r.students) > 0)
+      .map((r) => ({
+        key: `self:${r.name}`,
+        type: 'self_pay',
+        name: r.name,
+        student_count: Number(r.students),
+        paid_students: Number(r.paid_students || 0),
+        revenue: Number(r.revenue || 0),
+        avg_aptitude: roundAvg(selfApt.find((x) => x.name === r.name)?.avg_score),
+        avg_interview: roundAvg(selfInt.find((x) => x.name === r.name)?.avg_score),
+        avg_readiness: roundAvg(selfRead.find((x) => x.name === r.name)?.avg_score),
+        completed_interviews: Number(selfInt.find((x) => x.name === r.name)?.cnt || 0),
+      }));
+
+    const colleges = [...institutionsList, ...selfPayList];
+
+    res.json({
+      colleges,
+      totals: {
+        colleges: colleges.length,
+        students: colleges.reduce((sum, c) => sum + c.student_count, 0),
+        paid_students: colleges.reduce((sum, c) => sum + c.paid_students, 0),
+        revenue: colleges.reduce((sum, c) => sum + c.revenue, 0),
+      },
+    });
+  }),
+);
+
+router.get(
+  '/analytics/detail',
+  asyncHandler(async (req, res) => {
+    const { type = 'institution', id, name } = req.query;
+
+    let college = {};
+    let userFilterSql;
+    let params = {};
+
+    if (type === 'self_pay') {
+      const collegeName = String(name || '').trim();
+      if (!collegeName) throw badRequest('College name is required');
+      userFilterSql = `u.role = 'individual_student' AND u.college_name = :collegeName`;
+      params = { collegeName };
+      college = { type: 'self_pay', name: collegeName };
+    } else {
+      let institution;
+      try {
+        institution = await Institution.findByPk(id);
+      } catch (_e) {
+        institution = null;
+      }
+      if (!institution) throw notFound('Institution not found');
+      userFilterSql = `u."institutionId" = :collegeId AND u.role = 'student'`;
+      params = { collegeId: id };
+      college = { type: 'institution', id, name: institution.name, code: institution.code || '' };
+    }
+
+    const [users] = await sequelize.query(
+      `SELECT u._id, u.name, u.email, u.usn, u.year, u.stream, u.course_details,
+              u.department_id, d.name AS branch, u.status, u.is_active
+       FROM users u
+       LEFT JOIN departments d ON d._id = u.department_id
+       WHERE ${userFilterSql}
+       ORDER BY u.name ASC`,
+      { replacements: params }
+    );
+
+    const empty = {
+      college,
+      stats: {
+        total_students: 0,
+        paid_students: 0,
+        revenue: 0,
+        completed_interviews: 0,
+        active_journeys: 0,
+        completed_journeys: 0,
+        avg_aptitude: null,
+        avg_interview: null,
+        avg_communication: null,
+        avg_programming: null,
+        avg_readiness: null,
+      },
+      branches: [],
+      students: [],
+      strengths: [],
+      weaknesses: [],
+      revenue_by_plan: [],
+    };
+
+    const userIds = users.map((u) => u._id);
+    if (!userIds.length) return res.json(empty);
+
+    const [
+      [subs],
+      [journeys],
+      [apt],
+      [interviews],
+      [comm],
+      [prog],
+      [reportAvgs],
+      [reports],
+    ] = await Promise.all([
+      sequelize.query(
+        `SELECT s.student_id::text AS student_id, s.plan_name, s.plan_key, s.amount_paid, s.status AS sub_status, s.access_level
+         FROM subscriptions s
+         WHERE s.student_id::text IN (:uids) AND s.status <> 'cancelled'
+         ORDER BY s.created_at DESC`,
+        { replacements: { uids: userIds } }
+      ),
+      sequelize.query(
+        `SELECT sj.student_id, sj.journey_access_level, sj.current_level, sj.completed_interviews,
+                sj.readiness_score, sj.status AS journey_status
+         FROM student_journeys sj
+         WHERE sj.student_id IN (:uids)`,
+        { replacements: { uids: userIds } }
+      ),
+      sequelize.query(
+        `SELECT a.student_id::text AS student_id, COUNT(*) AS attempts, AVG(a.percentage) AS avg_score
+         FROM assessment_attempts a
+         WHERE a.status = 'submitted' AND a.student_id::text IN (:uids)
+         GROUP BY a.student_id`,
+        { replacements: { uids: userIds } }
+      ),
+      sequelize.query(
+        `SELECT ji.student_id, COUNT(*) AS cnt, AVG(ji.overall_score) AS avg_score
+         FROM journey_interviews ji
+         WHERE ji.status = 'completed' AND ji.student_id IN (:uids)
+         GROUP BY ji.student_id`,
+        { replacements: { uids: userIds } }
+      ),
+      sequelize.query(
+        `SELECT cr.student_id, COUNT(*) AS cnt, AVG((cr.overall->>'percentage')::numeric) AS avg_score
+         FROM communication_reports cr
+         WHERE cr.student_id IN (:uids)
+         GROUP BY cr.student_id`,
+        { replacements: { uids: userIds } }
+      ),
+      sequelize.query(
+        `SELECT pa.student_id::text AS student_id, COUNT(*) AS cnt,
+                AVG(CASE WHEN pa.total_marks > 0 THEN (pa.obtained_marks / pa.total_marks) * 100 ELSE NULL END) AS avg_score
+         FROM programming_assessment_attempts pa
+         WHERE pa.student_id::text IN (:uids)
+         GROUP BY pa.student_id`,
+        { replacements: { uids: userIds } }
+      ),
+      sequelize.query(
+        `SELECT r.student_id, COUNT(*) AS cnt, AVG((r.overall->>'percentage')::numeric) AS avg_score
+         FROM interview_reports r
+         WHERE r.student_id IN (:uids)
+         GROUP BY r.student_id`,
+        { replacements: { uids: userIds } }
+      ),
+      sequelize.query(
+        `SELECT DISTINCT ON (r.student_id) r.student_id, r.strengths, r.areas_to_improve
+         FROM interview_reports r
+         WHERE r.student_id IN (:uids)
+         ORDER BY r.student_id, r.created_at DESC`,
+        { replacements: { uids: userIds } }
+      ),
+    ]);
+
+    function toArr(v) {
+      if (Array.isArray(v)) return v.map(String).filter(Boolean);
+      if (typeof v === 'string') {
+        try {
+          const parsed = JSON.parse(v);
+          return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+        } catch (_e) {
+          return [];
+        }
+      }
+      return [];
+    }
+
+    const strengthFreq = new Map();
+    const weakFreq = new Map();
+
+    const students = users.map((u) => {
+      const uid = String(u._id);
+      const sub = subs.find((s) => String(s.student_id) === uid);
+      const journey = journeys.find((j) => String(j.student_id) === uid);
+      const a = apt.find((x) => String(x.student_id) === uid);
+      const iv = interviews.find((x) => String(x.student_id) === uid);
+      const ra = reportAvgs.find((x) => String(x.student_id) === uid);
+      const c = comm.find((x) => String(x.student_id) === uid);
+      const p = prog.find((x) => String(x.student_id) === uid);
+      const r = reports.find((x) => String(x.student_id) === uid);
+      const strengths = toArr(r?.strengths);
+      const weaknesses = toArr(r?.areas_to_improve);
+      for (const s of strengths) strengthFreq.set(s, (strengthFreq.get(s) || 0) + 1);
+      for (const w of weaknesses) weakFreq.set(w, (weakFreq.get(w) || 0) + 1);
+      return {
+        id: uid,
+        name: u.name,
+        email: u.email,
+        usn: u.usn || '',
+        year: u.year || '',
+        stream: u.stream || '',
+        course_details: u.course_details || '',
+        branch: u.branch || '',
+        status: u.status || 'active',
+        is_active: u.is_active !== false,
+        plan_name: sub?.plan_name || null,
+        plan_key: sub?.plan_key || null,
+        amount_paid: Number(sub?.amount_paid || 0),
+        sub_status: sub?.sub_status || null,
+        access_level: sub?.access_level || 0,
+        current_level: journey?.current_level || 0,
+        completed_interviews: Number(journey?.completed_interviews || 0),
+        readiness_score: journey?.readiness_score ?? null,
+        journey_status: journey?.journey_status || 'not_started',
+        avg_aptitude: roundAvg(a?.avg_score),
+        attempts: Number(a?.attempts || 0),
+        avg_interview: roundAvg(iv?.avg_score ?? ra?.avg_score),
+        interview_count: Math.max(Number(iv?.cnt || 0), Number(ra?.cnt || 0)),
+        avg_communication: roundAvg(c?.avg_score),
+        avg_programming: roundAvg(p?.avg_score),
+        strengths,
+        weaknesses,
+      };
+    });
+
+    const strengths = [...strengthFreq.entries()]
+      .map(([label, count]) => ({ label, count }))
+      .sort((x, y) => y.count - x.count)
+      .slice(0, 12);
+    const weaknesses = [...weakFreq.entries()]
+      .map(([label, count]) => ({ label, count }))
+      .sort((x, y) => y.count - x.count)
+      .slice(0, 12);
+
+    const [branchRevenue] = await sequelize.query(
+      `SELECT d.name AS branch, COUNT(DISTINCT u._id) AS students,
+              COUNT(s._id) AS paid_students, COALESCE(SUM(s.amount_paid), 0) AS revenue
+       FROM users u
+       JOIN departments d ON d._id = u.department_id
+       LEFT JOIN subscriptions s ON s.student_id::text = u._id::text AND s.status <> 'cancelled'
+       WHERE ${userFilterSql} AND u.department_id IS NOT NULL
+       GROUP BY d.name
+       ORDER BY revenue DESC`,
+      { replacements: params }
+    );
+
+    const [planRevenue] = await sequelize.query(
+      `SELECT COALESCE(s.plan_name, 'No plan') AS plan_name,
+              COUNT(DISTINCT u._id) AS students,
+              COUNT(s._id) AS paid_students,
+              COALESCE(SUM(s.amount_paid), 0) AS revenue
+       FROM users u
+       LEFT JOIN subscriptions s ON s.student_id::text = u._id::text AND s.status <> 'cancelled'
+       WHERE ${userFilterSql}
+       GROUP BY s.plan_name
+       ORDER BY revenue DESC`,
+      { replacements: params }
+    );
+
+    const paidCount = new Set(subs.map((s) => String(s.student_id))).size;
+    const revenue = students.reduce((sum, s) => sum + s.amount_paid, 0);
+    const completedInterviews = students.reduce((sum, s) => sum + s.completed_interviews, 0);
+    const activeJourneys = journeys.filter((j) => j.journey_status === 'in_progress').length;
+    const completedJourneys = journeys.filter((j) => j.journey_status === 'completed').length;
+
+    res.json({
+      college,
+      stats: {
+        total_students: students.length,
+        paid_students: paidCount,
+        revenue,
+        completed_interviews: completedInterviews,
+        active_journeys: activeJourneys,
+        completed_journeys: completedJourneys,
+        avg_aptitude: avgOf(students.map((s) => s.avg_aptitude)),
+        avg_interview: avgOf(students.map((s) => s.avg_interview)),
+        avg_communication: avgOf(students.map((s) => s.avg_communication)),
+        avg_programming: avgOf(students.map((s) => s.avg_programming)),
+        avg_readiness: avgOf(students.map((s) => s.readiness_score)),
+      },
+      branches: branchRevenue,
+      students,
+      strengths,
+      weaknesses,
+      revenue_by_plan: planRevenue,
+    });
   }),
 );
 

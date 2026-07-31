@@ -57,9 +57,25 @@ export const InterviewSession = sequelize.define('InterviewSession', {
     type: DataTypes.INTEGER,
     defaultValue: 1,
   },
+  max_questions: {
+    type: DataTypes.INTEGER,
+    defaultValue: null,
+  },
   status: {
     type: DataTypes.STRING(20),
     defaultValue: 'active',
+  },
+  interview_number: {
+    type: DataTypes.INTEGER,
+    defaultValue: null,
+  },
+  blueprint_title: {
+    type: DataTypes.STRING(255),
+    defaultValue: null,
+  },
+  blueprint_level: {
+    type: DataTypes.INTEGER,
+    defaultValue: null,
   },
 }, {
   tableName: 'interview_sessions',
