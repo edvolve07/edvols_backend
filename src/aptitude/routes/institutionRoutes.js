@@ -471,6 +471,109 @@ function avgOf(arr) {
 }
 
 router.get(
+  '/analytics/revenue',
+  asyncHandler(async (req, res) => {
+    const latestSub = `(
+      SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.plan_name, s.amount_paid
+      FROM subscriptions s
+      WHERE s.status <> 'cancelled'
+      ORDER BY s.student_id::text, s.created_at DESC
+    ) sub`;
+
+    const [instAgg] = await sequelize.query(
+      `SELECT u."institutionId" AS inst_id,
+              COUNT(DISTINCT u._id) AS students,
+              COUNT(sub.student_id) AS paid_students,
+              COALESCE(SUM(sub.amount_paid), 0) AS revenue
+       FROM users u
+       LEFT JOIN ${latestSub} ON sub.student_id = u._id::text
+       WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
+       GROUP BY u."institutionId"`
+    );
+
+    const [indAgg] = await sequelize.query(
+      `SELECT COALESCE(NULLIF(u.college_name, ''), 'Unspecified') AS name,
+              COUNT(*) AS students,
+              COUNT(sub.student_id) AS paid_students,
+              COALESCE(SUM(sub.amount_paid), 0) AS revenue
+       FROM users u
+       LEFT JOIN ${latestSub} ON sub.student_id = u._id::text
+       WHERE u.role = 'individual_student'
+       GROUP BY 1`
+    );
+
+    const [instPlan] = await sequelize.query(
+      `SELECT COALESCE(sub.plan_name, 'No plan') AS plan_name,
+              COUNT(sub.student_id) AS paid_students,
+              COALESCE(SUM(sub.amount_paid), 0) AS revenue
+       FROM users u
+       LEFT JOIN ${latestSub} ON sub.student_id = u._id::text
+       WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
+       GROUP BY sub.plan_name
+       ORDER BY revenue DESC`
+    );
+
+    const [indPlan] = await sequelize.query(
+      `SELECT COALESCE(sub.plan_name, 'No plan') AS plan_name,
+              COUNT(sub.student_id) AS paid_students,
+              COALESCE(SUM(sub.amount_paid), 0) AS revenue
+       FROM users u
+       LEFT JOIN ${latestSub} ON sub.student_id = u._id::text
+       WHERE u.role = 'individual_student'
+       GROUP BY sub.plan_name
+       ORDER BY revenue DESC`
+    );
+
+    const institutions = await Institution.findAll({ order: [['name', 'ASC']], raw: true });
+
+    const institutionsList = institutions
+      .map((inst) => {
+        const id = String(inst._id);
+        const row = instAgg.find((r) => String(r.inst_id) === id);
+        return {
+          id,
+          name: inst.name,
+          code: inst.code || '',
+          students: Number(row?.students || 0),
+          paid_students: Number(row?.paid_students || 0),
+          revenue: Number(row?.revenue || 0),
+        };
+      })
+      .filter((i) => i.students > 0);
+
+    const individualsList = indAgg.map((r) => ({
+      name: r.name,
+      students: Number(r.students),
+      paid_students: Number(r.paid_students || 0),
+      revenue: Number(r.revenue || 0),
+    }));
+
+    res.json({
+      institutions: institutionsList,
+      individuals: individualsList,
+      totals: {
+        institutions: {
+          groups: institutionsList.length,
+          students: institutionsList.reduce((s, i) => s + i.students, 0),
+          paid_students: institutionsList.reduce((s, i) => s + i.paid_students, 0),
+          revenue: institutionsList.reduce((s, i) => s + i.revenue, 0),
+        },
+        individuals: {
+          groups: individualsList.length,
+          students: individualsList.reduce((s, i) => s + i.students, 0),
+          paid_students: individualsList.reduce((s, i) => s + i.paid_students, 0),
+          revenue: individualsList.reduce((s, i) => s + i.revenue, 0),
+        },
+      },
+      plan_breakdown: {
+        institutions: instPlan,
+        individuals: indPlan,
+      },
+    });
+  }),
+);
+
+router.get(
   '/analytics/overview',
   asyncHandler(async (req, res) => {
     const institutions = await Institution.findAll({ order: [['name', 'ASC']], raw: true });
@@ -488,10 +591,15 @@ router.get(
 
     const [revenueAgg] = await sequelize.query(
       `SELECT u."institutionId" AS inst_id,
-              COUNT(DISTINCT u._id) AS paid_students,
-              COALESCE(SUM(s.amount_paid), 0) AS revenue
+              COUNT(sub.student_id) AS paid_students,
+              COALESCE(SUM(sub.amount_paid), 0) AS revenue
        FROM users u
-       LEFT JOIN subscriptions s ON s.student_id::text = u._id::text AND s.status <> 'cancelled'
+       LEFT JOIN (
+         SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.amount_paid
+         FROM subscriptions s
+         WHERE s.status <> 'cancelled'
+         ORDER BY s.student_id::text, s.created_at DESC
+       ) sub ON sub.student_id = u._id::text
        WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
        GROUP BY u."institutionId"`
     );
@@ -546,10 +654,15 @@ router.get(
     const [selfAgg] = await sequelize.query(
       `SELECT u.college_name AS name,
               COUNT(*) AS students,
-              COUNT(DISTINCT u._id) AS paid_students,
-              COALESCE(SUM(s.amount_paid), 0) AS revenue
+              COUNT(sub.student_id) AS paid_students,
+              COALESCE(SUM(sub.amount_paid), 0) AS revenue
        FROM users u
-       LEFT JOIN subscriptions s ON s.student_id::text = u._id::text AND s.status <> 'cancelled'
+       LEFT JOIN (
+         SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.amount_paid
+         FROM subscriptions s
+         WHERE s.status <> 'cancelled'
+         ORDER BY s.student_id::text, s.created_at DESC
+       ) sub ON sub.student_id = u._id::text
        WHERE u.role = 'individual_student' AND u.college_name IS NOT NULL AND u.college_name <> ''
        GROUP BY u.college_name`
     );
@@ -811,10 +924,15 @@ router.get(
 
     const [branchRevenue] = await sequelize.query(
       `SELECT d.name AS branch, COUNT(DISTINCT u._id) AS students,
-              COUNT(s._id) AS paid_students, COALESCE(SUM(s.amount_paid), 0) AS revenue
+              COUNT(sub.student_id) AS paid_students, COALESCE(SUM(sub.amount_paid), 0) AS revenue
        FROM users u
        JOIN departments d ON d._id = u.department_id
-       LEFT JOIN subscriptions s ON s.student_id::text = u._id::text AND s.status <> 'cancelled'
+       LEFT JOIN (
+         SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.amount_paid
+         FROM subscriptions s
+         WHERE s.status <> 'cancelled'
+         ORDER BY s.student_id::text, s.created_at DESC
+       ) sub ON sub.student_id = u._id::text
        WHERE ${userFilterSql} AND u.department_id IS NOT NULL
        GROUP BY d.name
        ORDER BY revenue DESC`,
@@ -822,14 +940,20 @@ router.get(
     );
 
     const [planRevenue] = await sequelize.query(
-      `SELECT COALESCE(s.plan_name, 'No plan') AS plan_name,
+      `SELECT COALESCE(sub.plan_name, 'No plan') AS plan_name,
               COUNT(DISTINCT u._id) AS students,
-              COUNT(s._id) AS paid_students,
-              COALESCE(SUM(s.amount_paid), 0) AS revenue
+              COUNT(sub.student_id) AS paid_students,
+              COALESCE(SUM(sub.amount_paid), 0) AS revenue
        FROM users u
-       LEFT JOIN subscriptions s ON s.student_id::text = u._id::text AND s.status <> 'cancelled'
+       LEFT JOIN (
+         SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id,
+                s.plan_name, s.amount_paid
+         FROM subscriptions s
+         WHERE s.status <> 'cancelled'
+         ORDER BY s.student_id::text, s.created_at DESC
+       ) sub ON sub.student_id = u._id::text
        WHERE ${userFilterSql}
-       GROUP BY s.plan_name
+       GROUP BY sub.plan_name
        ORDER BY revenue DESC`,
       { replacements: params }
     );

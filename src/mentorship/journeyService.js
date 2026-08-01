@@ -1108,6 +1108,14 @@ export class JourneyService {
       negotiatedPrice = null;
     }
 
+    const existingSub = await Subscription.findOne({
+      where: { student_id: studentId, status: 'active' },
+      order: [['created_at', 'DESC']],
+    });
+    if (existingSub) {
+      await existingSub.update({ status: 'upgraded' });
+    }
+
     await Subscription.create({
       student_id: studentId,
       plan_key: planKey,
