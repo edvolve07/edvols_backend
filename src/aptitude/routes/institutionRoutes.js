@@ -628,19 +628,18 @@ router.get(
       `SELECT institution_id, COUNT(*) AS cnt FROM departments GROUP BY institution_id`
     );
 
-    const [revenueAgg] = await sequelize.query(
-      `SELECT u."institutionId" AS inst_id,
-              COUNT(sub.student_id) AS paid_students,
-              COALESCE(SUM(sub.amount_paid), 0) AS revenue
+    const [instPlanAgg] = await sequelize.query(
+      `SELECT u."institutionId"::text AS inst_id, sub.plan_key, COUNT(*) AS n,
+              COALESCE(SUM(sub.amount_paid), 0) AS paid_sum
        FROM users u
-       LEFT JOIN (
-         SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.amount_paid
+       JOIN (
+         SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.plan_key, s.amount_paid
          FROM subscriptions s
          WHERE s.status <> 'cancelled'
          ORDER BY s.student_id::text, s.created_at DESC
        ) sub ON sub.student_id = u._id::text
        WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
-       GROUP BY u."institutionId"`
+       GROUP BY u."institutionId", sub.plan_key`
     );
 
     const [aptAgg] = await sequelize.query(
@@ -667,10 +666,21 @@ router.get(
        GROUP BY u."institutionId"`
     );
 
+    const INST_PRICE_KEYS = { basic: 'basic_price', advanced: 'advanced_price', professional: 'professional_price' };
+    const DEFAULT_INST_PRICES = { basic: 499, advanced: 1199, professional: 1999 };
+
     const institutionsList = institutions.map((inst) => {
       const id = String(inst._id);
       const users = userAgg.filter((r) => String(r.inst_id) === id);
-      const revRow = revenueAgg.find((r) => String(r.inst_id) === id);
+      const planRows = instPlanAgg.filter((r) => String(r.inst_id) === id);
+      const paid_students = planRows.reduce((s, r) => s + Number(r.n), 0);
+      const revenue = planRows.reduce((s, r) => {
+        if (INST_PRICE_KEYS[r.plan_key]) {
+          const price = inst[INST_PRICE_KEYS[r.plan_key]] ?? DEFAULT_INST_PRICES[r.plan_key];
+          return s + Number(r.n) * price;
+        }
+        return s + Number(r.paid_sum);
+      }, 0);
       return {
         key: `institution:${id}`,
         type: 'institution',
@@ -681,8 +691,8 @@ router.get(
         admins: Number(users.find((r) => r.role === 'admin')?.cnt || 0),
         student_count: Number(users.find((r) => r.role === 'student')?.cnt || 0),
         branch_count: Number(deptAgg.find((r) => String(r.institution_id) === id)?.cnt || 0),
-        paid_students: Number(revRow?.paid_students || 0),
-        revenue: Number(revRow?.revenue || 0),
+        paid_students,
+        revenue,
         avg_aptitude: roundAvg(aptAgg.find((r) => String(r.inst_id) === id)?.avg_score),
         avg_interview: roundAvg(intAgg.find((r) => String(r.inst_id) === id)?.avg_score),
         avg_readiness: roundAvg(readAgg.find((r) => String(r.inst_id) === id)?.avg_score),
@@ -764,7 +774,11 @@ router.get(
   asyncHandler(async (req, res) => {
     const { type = 'institution', id, name } = req.query;
 
+    const INST_PRICE_KEYS = { basic: 'basic_price', advanced: 'advanced_price', professional: 'professional_price' };
+    const DEFAULT_INST_PRICES = { basic: 499, advanced: 1199, professional: 1999 };
+
     let college = {};
+    let institutionRow = null;
     let userFilterSql;
     let params = {};
 
@@ -775,16 +789,25 @@ router.get(
       params = { collegeName };
       college = { type: 'self_pay', name: collegeName };
     } else {
-      let institution;
       try {
-        institution = await Institution.findByPk(id);
+        institutionRow = await Institution.findByPk(id);
       } catch (_e) {
-        institution = null;
+        institutionRow = null;
       }
-      if (!institution) throw notFound('Institution not found');
+      if (!institutionRow) throw notFound('Institution not found');
       userFilterSql = `u."institutionId" = :collegeId AND u.role = 'student'`;
       params = { collegeId: id };
-      college = { type: 'institution', id, name: institution.name, code: institution.code || '' };
+      college = {
+        type: 'institution',
+        id,
+        name: institutionRow.name,
+        code: institutionRow.code || '',
+        pricing: {
+          basic: institutionRow.basic_price ?? 499,
+          advanced: institutionRow.advanced_price ?? 1199,
+          professional: institutionRow.professional_price ?? 1999,
+        },
+      };
     }
 
     const [users] = await sequelize.query(
@@ -961,44 +984,80 @@ router.get(
       .sort((x, y) => y.count - x.count)
       .slice(0, 12);
 
-    const [branchRevenue] = await sequelize.query(
-      `SELECT d.name AS branch, COUNT(DISTINCT u._id) AS students,
-              COUNT(sub.student_id) AS paid_students, COALESCE(SUM(sub.amount_paid), 0) AS revenue
-       FROM users u
-       JOIN departments d ON d._id = u.department_id
-       LEFT JOIN (
-         SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.amount_paid
-         FROM subscriptions s
-         WHERE s.status <> 'cancelled'
-         ORDER BY s.student_id::text, s.created_at DESC
-       ) sub ON sub.student_id = u._id::text
-       WHERE ${userFilterSql} AND u.department_id IS NOT NULL
-       GROUP BY d.name
-       ORDER BY revenue DESC`,
-      { replacements: params }
-    );
+    const priceFor = (planKey, amountPaid) => {
+      if (institutionRow && INST_PRICE_KEYS[planKey]) {
+        return institutionRow[INST_PRICE_KEYS[planKey]] ?? DEFAULT_INST_PRICES[planKey];
+      }
+      return Number(amountPaid || 0);
+    };
 
-    const [planRevenue] = await sequelize.query(
-      `SELECT COALESCE(sub.plan_name, 'No plan') AS plan_name,
-              COUNT(DISTINCT u._id) AS students,
-              COUNT(sub.student_id) AS paid_students,
-              COALESCE(SUM(sub.amount_paid), 0) AS revenue
-       FROM users u
-       LEFT JOIN (
-         SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id,
-                s.plan_name, s.amount_paid
-         FROM subscriptions s
-         WHERE s.status <> 'cancelled'
-         ORDER BY s.student_id::text, s.created_at DESC
-       ) sub ON sub.student_id = u._id::text
-       WHERE ${userFilterSql}
-       GROUP BY sub.plan_name
-       ORDER BY revenue DESC`,
-      { replacements: params }
-    );
+    let branchRevenue = [];
+    let planRevenue = [];
+    if (institutionRow) {
+      const branchMap = new Map();
+      const planMap = new Map();
+      for (const s of students) {
+        const price = priceFor(s.plan_key, s.amount_paid);
+        if (s.branch) {
+          const b = branchMap.get(s.branch) || { branch: s.branch, students: 0, paid_students: 0, revenue: 0 };
+          b.students += 1;
+          if (s.plan_key) {
+            b.paid_students += 1;
+            b.revenue += price;
+          }
+          branchMap.set(s.branch, b);
+        }
+        const pk = s.plan_name || 'No plan';
+        const p = planMap.get(pk) || { plan_name: pk, students: 0, paid_students: 0, revenue: 0 };
+        p.students += 1;
+        if (s.plan_key) {
+          p.paid_students += 1;
+          p.revenue += price;
+        }
+        planMap.set(pk, p);
+      }
+      branchRevenue = [...branchMap.values()].sort((a, b) => b.revenue - a.revenue);
+      planRevenue = [...planMap.values()].sort((a, b) => b.revenue - a.revenue);
+    } else {
+      [branchRevenue] = await sequelize.query(
+        `SELECT d.name AS branch, COUNT(DISTINCT u._id) AS students,
+                COUNT(sub.student_id) AS paid_students, COALESCE(SUM(sub.amount_paid), 0) AS revenue
+         FROM users u
+         JOIN departments d ON d._id = u.department_id
+         LEFT JOIN (
+           SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.amount_paid
+           FROM subscriptions s
+           WHERE s.status <> 'cancelled'
+           ORDER BY s.student_id::text, s.created_at DESC
+         ) sub ON sub.student_id = u._id::text
+         WHERE ${userFilterSql} AND u.department_id IS NOT NULL
+         GROUP BY d.name
+         ORDER BY revenue DESC`,
+        { replacements: params }
+      );
+
+      [planRevenue] = await sequelize.query(
+        `SELECT COALESCE(sub.plan_name, 'No plan') AS plan_name,
+                COUNT(DISTINCT u._id) AS students,
+                COUNT(sub.student_id) AS paid_students,
+                COALESCE(SUM(sub.amount_paid), 0) AS revenue
+         FROM users u
+         LEFT JOIN (
+           SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id,
+                  s.plan_name, s.amount_paid
+           FROM subscriptions s
+           WHERE s.status <> 'cancelled'
+           ORDER BY s.student_id::text, s.created_at DESC
+         ) sub ON sub.student_id = u._id::text
+         WHERE ${userFilterSql}
+         GROUP BY sub.plan_name
+         ORDER BY revenue DESC`,
+        { replacements: params }
+      );
+    }
 
     const paidCount = new Set(subs.map((s) => String(s.student_id))).size;
-    const revenue = students.reduce((sum, s) => sum + s.amount_paid, 0);
+    const revenue = students.reduce((sum, s) => sum + priceFor(s.plan_key, s.amount_paid), 0);
     const completedInterviews = students.reduce((sum, s) => sum + s.completed_interviews, 0);
     const activeJourneys = journeys.filter((j) => j.journey_status === 'in_progress').length;
     const completedJourneys = journeys.filter((j) => j.journey_status === 'completed').length;
