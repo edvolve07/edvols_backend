@@ -38,6 +38,7 @@ const clientUrls = (process.env.CLIENT_URL || '').split(',').map(s => s.trim()).
 
 export const ALLOWED_ORIGINS = [
   'https://app.edvols.in',
+  'https://edvols-frontend.vercel.app',
   ...clientUrls,
   ...(process.env.NODE_ENV !== 'production' ? ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:4173'] : []),
 ].filter(Boolean);
