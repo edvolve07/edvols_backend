@@ -473,8 +473,11 @@ function avgOf(arr) {
 router.get(
   '/analytics/revenue',
   asyncHandler(async (req, res) => {
+    const INST_PRICE_KEYS = { basic: 'basic_price', advanced: 'advanced_price', professional: 'professional_price' };
+    const DEFAULT_INST_PRICES = { basic: 499, advanced: 1199, professional: 1999 };
+
     const latestSub = `(
-      SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.plan_name, s.amount_paid
+      SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.plan_key, s.plan_name, s.amount_paid
       FROM subscriptions s
       WHERE s.status <> 'cancelled'
       ORDER BY s.student_id::text, s.created_at DESC
@@ -483,12 +486,20 @@ router.get(
     const [instAgg] = await sequelize.query(
       `SELECT u."institutionId" AS inst_id,
               COUNT(DISTINCT u._id) AS students,
-              COUNT(sub.student_id) AS paid_students,
-              COALESCE(SUM(sub.amount_paid), 0) AS revenue
+              COUNT(sub.student_id) AS paid_students
        FROM users u
        LEFT JOIN ${latestSub} ON sub.student_id = u._id::text
        WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
        GROUP BY u."institutionId"`
+    );
+
+    const [instPlans] = await sequelize.query(
+      `SELECT u."institutionId"::text AS inst_id, sub.plan_key, sub.plan_name,
+              COUNT(*) AS n, COALESCE(SUM(sub.amount_paid), 0) AS paid_sum
+       FROM users u
+       JOIN ${latestSub} ON sub.student_id = u._id::text
+       WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
+       GROUP BY u."institutionId", sub.plan_key, sub.plan_name`
     );
 
     const [indAgg] = await sequelize.query(
@@ -500,17 +511,6 @@ router.get(
        LEFT JOIN ${latestSub} ON sub.student_id = u._id::text
        WHERE u.role = 'individual_student'
        GROUP BY 1`
-    );
-
-    const [instPlan] = await sequelize.query(
-      `SELECT COALESCE(sub.plan_name, 'No plan') AS plan_name,
-              COUNT(sub.student_id) AS paid_students,
-              COALESCE(SUM(sub.amount_paid), 0) AS revenue
-       FROM users u
-       LEFT JOIN ${latestSub} ON sub.student_id = u._id::text
-       WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
-       GROUP BY sub.plan_name
-       ORDER BY revenue DESC`
     );
 
     const [indPlan] = await sequelize.query(
@@ -529,17 +529,55 @@ router.get(
     const institutionsList = institutions
       .map((inst) => {
         const id = String(inst._id);
-        const row = instAgg.find((r) => String(r.inst_id) === id);
+        const agg = instAgg.find((r) => String(r.inst_id) === id) || {};
+        const plans = instPlans
+          .filter((r) => String(r.inst_id) === id)
+          .map((r) => {
+            let price = null;
+            let revenue;
+            if (INST_PRICE_KEYS[r.plan_key]) {
+              price = inst[INST_PRICE_KEYS[r.plan_key]] ?? DEFAULT_INST_PRICES[r.plan_key];
+              revenue = Number(r.n) * price;
+            } else {
+              revenue = Number(r.paid_sum);
+            }
+            return {
+              plan_key: r.plan_key,
+              plan_name: r.plan_name,
+              price,
+              students: Number(r.n),
+              revenue,
+            };
+          })
+          .sort((a, b) => b.revenue - a.revenue);
         return {
           id,
           name: inst.name,
           code: inst.code || '',
-          students: Number(row?.students || 0),
-          paid_students: Number(row?.paid_students || 0),
-          revenue: Number(row?.revenue || 0),
+          students: Number(agg.students || 0),
+          paid_students: Number(agg.paid_students || 0),
+          pricing: {
+            basic: inst.basic_price ?? DEFAULT_INST_PRICES.basic,
+            advanced: inst.advanced_price ?? DEFAULT_INST_PRICES.advanced,
+            professional: inst.professional_price ?? DEFAULT_INST_PRICES.professional,
+          },
+          plans,
+          revenue: plans.reduce((s, p) => s + p.revenue, 0),
         };
       })
       .filter((i) => i.students > 0);
+
+    const institutionPlans = institutionsList.flatMap((i) =>
+      i.plans.map((p) => ({
+        institution_id: i.id,
+        institution_name: i.name,
+        plan_key: p.plan_key,
+        plan_name: p.plan_name,
+        price: p.price,
+        students: p.students,
+        revenue: p.revenue,
+      })),
+    );
 
     const individualsList = indAgg.map((r) => ({
       name: r.name,
@@ -550,6 +588,7 @@ router.get(
 
     res.json({
       institutions: institutionsList,
+      institution_plans: institutionPlans,
       individuals: individualsList,
       totals: {
         institutions: {
@@ -566,7 +605,7 @@ router.get(
         },
       },
       plan_breakdown: {
-        institutions: instPlan,
+        institutions: institutionPlans,
         individuals: indPlan,
       },
     });
