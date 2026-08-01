@@ -470,12 +470,14 @@ function avgOf(arr) {
   return Math.round((nums.reduce((s, v) => s + Number(v), 0) / nums.length) * 10) / 10;
 }
 
+const INST_PRICE_KEYS = { basic: 'basic_price', advanced: 'advanced_price', professional: 'professional_price' };
+const DEFAULT_INST_PRICES = { basic: 499, advanced: 1199, professional: 1999 };
+const JOURNEY_LEVEL_PLAN = { 1: 'basic', 3: 'advanced', 6: 'professional' };
+const PLAN_NAMES = { basic: 'Basic', advanced: 'Advanced', professional: 'Professional' };
+
 router.get(
   '/analytics/revenue',
   asyncHandler(async (req, res) => {
-    const INST_PRICE_KEYS = { basic: 'basic_price', advanced: 'advanced_price', professional: 'professional_price' };
-    const DEFAULT_INST_PRICES = { basic: 499, advanced: 1199, professional: 1999 };
-
     const latestSub = `(
       SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.plan_key, s.plan_name, s.amount_paid
       FROM subscriptions s
@@ -485,21 +487,19 @@ router.get(
 
     const [instAgg] = await sequelize.query(
       `SELECT u."institutionId" AS inst_id,
-              COUNT(DISTINCT u._id) AS students,
-              COUNT(sub.student_id) AS paid_students
+              COUNT(DISTINCT u._id) AS students
        FROM users u
-       LEFT JOIN ${latestSub} ON sub.student_id = u._id::text
        WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
        GROUP BY u."institutionId"`
     );
 
     const [instPlans] = await sequelize.query(
-      `SELECT u."institutionId"::text AS inst_id, sub.plan_key, sub.plan_name,
-              COUNT(*) AS n, COALESCE(SUM(sub.amount_paid), 0) AS paid_sum
-       FROM users u
-       JOIN ${latestSub} ON sub.student_id = u._id::text
+      `SELECT u."institutionId"::text AS inst_id, sj.journey_access_level AS access_level, COUNT(*) AS n
+       FROM student_journeys sj
+       JOIN users u ON u._id::text = sj.student_id
        WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
-       GROUP BY u."institutionId", sub.plan_key, sub.plan_name`
+         AND sj.journey_access_level IN (1, 3, 6)
+       GROUP BY u."institutionId", sj.journey_access_level`
     );
 
     const [indAgg] = await sequelize.query(
@@ -533,29 +533,24 @@ router.get(
         const plans = instPlans
           .filter((r) => String(r.inst_id) === id)
           .map((r) => {
-            let price = null;
-            let revenue;
-            if (INST_PRICE_KEYS[r.plan_key]) {
-              price = inst[INST_PRICE_KEYS[r.plan_key]] ?? DEFAULT_INST_PRICES[r.plan_key];
-              revenue = Number(r.n) * price;
-            } else {
-              revenue = Number(r.paid_sum);
-            }
+            const planKey = JOURNEY_LEVEL_PLAN[Number(r.access_level)];
+            const price = inst[INST_PRICE_KEYS[planKey]] ?? DEFAULT_INST_PRICES[planKey];
             return {
-              plan_key: r.plan_key,
-              plan_name: r.plan_name,
+              plan_key: planKey,
+              plan_name: PLAN_NAMES[planKey],
               price,
               students: Number(r.n),
-              revenue,
+              revenue: Number(r.n) * price,
             };
           })
           .sort((a, b) => b.revenue - a.revenue);
+        const paid = plans.reduce((s, p) => s + p.students, 0);
         return {
           id,
           name: inst.name,
           code: inst.code || '',
           students: Number(agg.students || 0),
-          paid_students: Number(agg.paid_students || 0),
+          paid_students: paid,
           pricing: {
             basic: inst.basic_price ?? DEFAULT_INST_PRICES.basic,
             advanced: inst.advanced_price ?? DEFAULT_INST_PRICES.advanced,
@@ -629,17 +624,12 @@ router.get(
     );
 
     const [instPlanAgg] = await sequelize.query(
-      `SELECT u."institutionId"::text AS inst_id, sub.plan_key, COUNT(*) AS n,
-              COALESCE(SUM(sub.amount_paid), 0) AS paid_sum
-       FROM users u
-       JOIN (
-         SELECT DISTINCT ON (s.student_id::text) s.student_id::text AS student_id, s.plan_key, s.amount_paid
-         FROM subscriptions s
-         WHERE s.status <> 'cancelled'
-         ORDER BY s.student_id::text, s.created_at DESC
-       ) sub ON sub.student_id = u._id::text
+      `SELECT u."institutionId"::text AS inst_id, sj.journey_access_level AS access_level, COUNT(*) AS n
+       FROM student_journeys sj
+       JOIN users u ON u._id::text = sj.student_id
        WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
-       GROUP BY u."institutionId", sub.plan_key`
+         AND sj.journey_access_level IN (1, 3, 6)
+       GROUP BY u."institutionId", sj.journey_access_level`
     );
 
     const [aptAgg] = await sequelize.query(
@@ -666,20 +656,15 @@ router.get(
        GROUP BY u."institutionId"`
     );
 
-    const INST_PRICE_KEYS = { basic: 'basic_price', advanced: 'advanced_price', professional: 'professional_price' };
-    const DEFAULT_INST_PRICES = { basic: 499, advanced: 1199, professional: 1999 };
-
     const institutionsList = institutions.map((inst) => {
       const id = String(inst._id);
       const users = userAgg.filter((r) => String(r.inst_id) === id);
       const planRows = instPlanAgg.filter((r) => String(r.inst_id) === id);
       const paid_students = planRows.reduce((s, r) => s + Number(r.n), 0);
       const revenue = planRows.reduce((s, r) => {
-        if (INST_PRICE_KEYS[r.plan_key]) {
-          const price = inst[INST_PRICE_KEYS[r.plan_key]] ?? DEFAULT_INST_PRICES[r.plan_key];
-          return s + Number(r.n) * price;
-        }
-        return s + Number(r.paid_sum);
+        const planKey = JOURNEY_LEVEL_PLAN[Number(r.access_level)];
+        const price = inst[INST_PRICE_KEYS[planKey]] ?? DEFAULT_INST_PRICES[planKey];
+        return s + Number(r.n) * price;
       }, 0);
       return {
         key: `institution:${id}`,
@@ -774,9 +759,6 @@ router.get(
   asyncHandler(async (req, res) => {
     const { type = 'institution', id, name } = req.query;
 
-    const INST_PRICE_KEYS = { basic: 'basic_price', advanced: 'advanced_price', professional: 'professional_price' };
-    const DEFAULT_INST_PRICES = { basic: 499, advanced: 1199, professional: 1999 };
-
     let college = {};
     let institutionRow = null;
     let userFilterSql;
@@ -785,8 +767,12 @@ router.get(
     if (type === 'self_pay') {
       const collegeName = String(name || '').trim();
       if (!collegeName) throw badRequest('College name is required');
-      userFilterSql = `u.role = 'individual_student' AND u.college_name = :collegeName`;
-      params = { collegeName };
+      if (collegeName === 'Unspecified') {
+        userFilterSql = `u.role = 'individual_student' AND (u.college_name IS NULL OR u.college_name = '')`;
+      } else {
+        userFilterSql = `u.role = 'individual_student' AND u.college_name = :collegeName`;
+        params = { collegeName };
+      }
       college = { type: 'self_pay', name: collegeName };
     } else {
       try {
@@ -944,6 +930,24 @@ router.get(
       const weaknesses = toArr(r?.areas_to_improve);
       for (const s of strengths) strengthFreq.set(s, (strengthFreq.get(s) || 0) + 1);
       for (const w of weaknesses) weakFreq.set(w, (weakFreq.get(w) || 0) + 1);
+      const journeyLevel = Number(journey?.journey_access_level || 0);
+      let planKey = null;
+      let planName = null;
+      let amountPaid = 0;
+      let accessLevel = 0;
+      if (institutionRow) {
+        planKey = JOURNEY_LEVEL_PLAN[journeyLevel] || null;
+        planName = planKey ? PLAN_NAMES[planKey] : null;
+        accessLevel = journeyLevel;
+        if (planKey) {
+          amountPaid = institutionRow[INST_PRICE_KEYS[planKey]] ?? DEFAULT_INST_PRICES[planKey];
+        }
+      } else {
+        planKey = sub?.plan_key || null;
+        planName = sub?.plan_name || null;
+        amountPaid = Number(sub?.amount_paid || 0);
+        accessLevel = Number(sub?.access_level || 0);
+      }
       return {
         id: uid,
         name: u.name,
@@ -955,11 +959,11 @@ router.get(
         branch: u.branch || '',
         status: u.status || 'active',
         is_active: u.is_active !== false,
-        plan_name: sub?.plan_name || null,
-        plan_key: sub?.plan_key || null,
-        amount_paid: Number(sub?.amount_paid || 0),
+        plan_name: planName,
+        plan_key: planKey,
+        amount_paid: amountPaid,
         sub_status: sub?.sub_status || null,
-        access_level: sub?.access_level || 0,
+        access_level: accessLevel,
         current_level: journey?.current_level || 0,
         completed_interviews: Number(journey?.completed_interviews || 0),
         readiness_score: journey?.readiness_score ?? null,
@@ -1056,7 +1060,9 @@ router.get(
       );
     }
 
-    const paidCount = new Set(subs.map((s) => String(s.student_id))).size;
+    const paidCount = institutionRow
+      ? students.filter((s) => s.plan_key).length
+      : new Set(subs.map((s) => String(s.student_id))).size;
     const revenue = students.reduce((sum, s) => sum + priceFor(s.plan_key, s.amount_paid), 0);
     const completedInterviews = students.reduce((sum, s) => sum + s.completed_interviews, 0);
     const activeJourneys = journeys.filter((j) => j.journey_status === 'in_progress').length;
