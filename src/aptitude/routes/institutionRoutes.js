@@ -174,10 +174,21 @@ router.post(
       certificates: req.body.modules?.certificates !== false,
     };
 
+    const prices = {};
+    for (const key of ['basic_price', 'advanced_price', 'professional_price']) {
+      const raw = req.body[key];
+      const parsed = raw === undefined || raw === null || raw === '' ? null : parseInt(raw, 10);
+      if (parsed !== null && (!Number.isInteger(parsed) || parsed < 0)) {
+        throw badRequest(`${key} must be a positive number or blank to use the default`);
+      }
+      prices[key] = parsed;
+    }
+
     const institution = await Institution.create({
       name, code, email, phone, address, modules,
       status: status === 'inactive' ? 'inactive' : 'active',
       created_by: req.user._id,
+      ...prices,
     });
     await syncInstitutionModules(institution._id, modules);
 
