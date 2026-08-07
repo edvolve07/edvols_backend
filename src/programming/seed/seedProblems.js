@@ -618,10 +618,7 @@ function genHiddenCases(problemText, title) {
     return h;
   }
 
-  return [
-    { input: '7', output: '7' },
-    { input: '99', output: '99' },
-  ];
+  return [];
 }
 
 function genSamples(problemText, title) {
@@ -1098,11 +1095,7 @@ function genSamples(problemText, title) {
     return s;
   }
 
-  // Fallback based on input/output format hints
-  return [
-    { input: '42', output: '42', explanation: 'Sample test case demonstrating the expected input and output format.' },
-    { input: '100', output: '100', explanation: 'Another test case to verify your solution handles different values correctly.' },
-  ];
+  return [];
 }
 
 async function seedProblems() {

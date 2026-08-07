@@ -30,6 +30,7 @@ const ProgrammingProblem = sequelize.define('ProgrammingProblem', {
   description: { type: DataTypes.TEXT, allowNull: false },
   sample_test_cases: { type: DataTypes.JSONB, defaultValue: [] },
   hidden_test_cases: { type: DataTypes.JSONB, defaultValue: [] },
+  is_auto_gradable: { type: DataTypes.BOOLEAN, defaultValue: true },
 }, { tableName: 'programming_problems', timestamps: false });
 
 function genHiddenCases(problemText, title) {
@@ -477,10 +478,7 @@ function genHiddenCases(problemText, title) {
     return h;
   }
 
-  return [
-    { input: '7', output: '7' },
-    { input: '99', output: '99' },
-  ];
+  return [];
 }
 
 async function updateHiddenCases() {
@@ -500,7 +498,11 @@ async function updateHiddenCases() {
 
   for (const problem of problems) {
     const hidden = genHiddenCases(problem.description, problem.title);
-    if (hidden.length === 0) { skipped++; continue; }
+    if (hidden.length === 0) {
+      // No verified cases can be generated — mark as non-auto-gradable and clear garbage
+      updates.push({ _id: problem._id, hidden_test_cases: [], is_auto_gradable: false });
+      continue;
+    }
     updates.push({ _id: problem._id, hidden_test_cases: hidden });
   }
 
@@ -511,7 +513,9 @@ async function updateHiddenCases() {
     const batch = updates.slice(i, i + BATCH);
     await Promise.all(batch.map((u) =>
       ProgrammingProblem.update(
-        { hidden_test_cases: u.hidden_test_cases },
+        u.is_auto_gradable !== undefined
+          ? { hidden_test_cases: u.hidden_test_cases, is_auto_gradable: u.is_auto_gradable }
+          : { hidden_test_cases: u.hidden_test_cases },
         { where: { _id: u._id } },
       )
     ));

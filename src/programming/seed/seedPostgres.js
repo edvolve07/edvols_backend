@@ -685,10 +685,7 @@ function genHiddenCases(problemText, title) {
     return h;
   }
 
-  return [
-    { input: '7', output: '7' },
-    { input: '99', output: '99' },
-  ];
+  return [];
 }
 
 function genSamples(problemText, title) {
@@ -977,7 +974,6 @@ function genSamples(problemText, title) {
     s.push({ input: '5 5 5\n5', output: '3', explanation: 'The number 5 appears 3 times.' });
     return s;
   }
-  s.push({ input: '1', output: '1', explanation: 'Default test case.' });
   return s;
 }
 
