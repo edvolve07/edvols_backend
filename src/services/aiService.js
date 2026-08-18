@@ -26,11 +26,11 @@ class AiService {
   constructor() {
     // Prefer specifying models in config so we can change them without code edits:
     this.models = Array.isArray(config.groqModels) && config.groqModels.length > 0
-      ? config.groqModels
-      : [
-        "llama-3.1-405b-reasoning",
-        "mixtral-8x7b-32768",
-      ];
+  ? config.groqModels
+  : [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+  ];
 
     this.clients = Array.isArray(config.groqApiKeys) ? config.groqApiKeys.map(key => new Groq({ apiKey: key })) : [];
   }
