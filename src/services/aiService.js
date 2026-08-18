@@ -24,15 +24,19 @@ function clampScore(value) {
 
 class AiService {
   constructor() {
-    this.models = [
-      "llama-3.1-405b-reasoning",
-      "mixtral-8x7b-32768",
-    ];
-    this.clients = config.groqApiKeys.map(key => new Groq({ apiKey: key }));
+    // Prefer specifying models in config so we can change them without code edits:
+    this.models = Array.isArray(config.groqModels) && config.groqModels.length > 0
+      ? config.groqModels
+      : [
+        "llama-3.1-405b-reasoning",
+        "mixtral-8x7b-32768",
+      ];
+
+    this.clients = Array.isArray(config.groqApiKeys) ? config.groqApiKeys.map(key => new Groq({ apiKey: key })) : [];
   }
 
   rebuildClients() {
-    this.clients = config.groqApiKeys.map(key => new Groq({ apiKey: key }));
+    this.clients = Array.isArray(config.groqApiKeys) ? config.groqApiKeys.map(key => new Groq({ apiKey: key })) : [];
   }
 
   async generateContent(prompt, feature = "interview_chat") {
@@ -42,8 +46,9 @@ class AiService {
 
     let lastError;
 
+    // iterate over clients and a snapshot of models (we may modify this.models on the fly)
     for (const client of this.clients) {
-      for (const model of this.models) {
+      for (const model of [...this.models]) {
         try {
           const response = await client.chat.completions.create({
             model,
@@ -59,13 +64,43 @@ class AiService {
           return response.choices?.[0]?.message?.content || "";
         } catch (error) {
           lastError = error;
+
+          // Build a robust error message from possible shapes
+          let errMsg = error?.message || String(error);
+          try {
+            if (error?.response?.data) {
+              errMsg = typeof error.response.data === 'string' ? error.response.data : JSON.stringify(error.response.data);
+            }
+          } catch (e) {
+            // ignore
+          }
+
           await recordAiUsage({
             provider: "groq",
             model,
             feature,
             status: "error",
-            metadata: { message: error.message }
+            metadata: { message: errMsg }
           });
+
+          // Detect decommissioned-model errors and remove them from rotation so we don't retry forever
+          try {
+            const lower = String(errMsg).toLowerCase();
+            const isDecommissioned = (
+              lower.includes('model_decommissioned') ||
+              lower.includes('has been decommissioned') ||
+              // Groq sometimes includes the phrase "model `name` has been decommissioned"
+              (/model `.*` has been decommissioned/.test(String(errMsg))) ||
+              (error?.response?.data?.error?.code === 'model_decommissioned')
+            );
+
+            if (isDecommissioned) {
+              this.models = this.models.filter(m => m !== model);
+              console.warn(`Removed decommissioned Groq model from rotation: ${model}`);
+            }
+          } catch (e) {
+            // swallow any errors from the detection logic
+          }
         }
       }
     }
@@ -150,7 +185,7 @@ Return ONLY the question text:`;
 
     try {
       const text = await this.generateContent(prompt, "interview_next_question");
-      return text.trim().replace(/^["']|["']$/g, "");
+      return text.trim().replace(/^['"]|['"]$/g, "");
     } catch (error) {
       throw new HttpError(500, `Next question generation failed: ${error.message}`);
     }
@@ -524,7 +559,7 @@ Return ONLY the question text:`;
 
     try {
       const text = await this.generateContent(prompt, "blueprint_first_question");
-      return text.trim().replace(/^["']|["']$/g, "");
+      return text.trim().replace(/^['\"]|['\"]$/g, "");
     } catch (error) {
       throw new HttpError(500, `Blueprint question generation failed: ${error.message}`);
     }
@@ -553,7 +588,7 @@ Return ONLY the question text:`;
 
     try {
       const text = await this.generateContent(prompt, "blueprint_next_question");
-      return text.trim().replace(/^["']|["']$/g, "");
+      return text.trim().replace(/^['\"]|['\"]$/g, "");
     } catch (error) {
       throw new HttpError(500, `Blueprint next question generation failed: ${error.message}`);
     }
