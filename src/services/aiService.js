@@ -24,8 +24,8 @@ function clampScore(value) {
 class AiService {
   constructor() {
     this.models = [
-      "llama-3.3-70b-versatile",
-      "llama-3.1-8b-instant",
+      "llama-3.1-405b-reasoning",
+      "mixtral-8x7b-32768",
     ];
     this.clients = config.groqApiKeys.map(key => new Groq({ apiKey: key }));
   }
@@ -245,7 +245,7 @@ Return ONLY valid JSON, no markdown:
   }
 
   async generateCommunicationScenario(category) {
-    const isInterview = category.includes('Tell Me About') || category.includes('Behavioral') || category.includes('Strengths') || category.includes('Why This') || category.includes('Technical') || category.includes('Difficult') || category.includes('Career') || category.includes('Salary');
+    const isInterview = category.includes('Tell Me About') || category.includes('Behavioral') || category.includes('Strengths') || category.includes('Why This') || category.includes('Technical');
     const prompt = isInterview
       ? `You are an interview coach helping a student practice their communication skills for job interviews.
 
@@ -286,7 +286,7 @@ Return ONLY valid JSON:
   }
 
   async evaluateCommunicationResponse(question, answer, category = 'General') {
-    const isInterview = category.includes('Tell Me About') || category.includes('Behavioral') || category.includes('Strengths') || category.includes('Why This') || category.includes('Technical') || category.includes('Difficult') || category.includes('Career') || category.includes('Salary');
+    const isInterview = category.includes('Tell Me About') || category.includes('Behavioral') || category.includes('Strengths') || category.includes('Why This') || category.includes('Technical');
     const prompt = isInterview
       ? `You are a strict interview coach evaluating a candidate's response in a mock interview communication practice.
 
@@ -409,7 +409,7 @@ Return ONLY valid JSON, no markdown:
   }
 
   async generateCommunicationReport(exchanges, category = 'General') {
-    const isInterview = category.includes('Tell Me About') || category.includes('Behavioral') || category.includes('Strengths') || category.includes('Why This') || category.includes('Technical') || category.includes('Difficult') || category.includes('Career') || category.includes('Salary');
+    const isInterview = category.includes('Tell Me About') || category.includes('Behavioral') || category.includes('Strengths') || category.includes('Why This') || category.includes('Technical');
     const contextLabel = isInterview ? 'interview communication' : 'communication';
     const contextPlural = isInterview ? 'interviews' : 'situations';
     const prompt = `Based on this ${contextLabel} practice session, create a comprehensive coaching report.
@@ -505,7 +505,7 @@ Return ONLY valid JSON:
 - Chosen Interview Domain: ${domain || 'Not specified'}
 - Chosen Target Role: ${role || 'Not specified'}
 
-IMPORTANT: Adapt this interview to the candidate's stream, chosen domain, and target role. Do not assume a software engineering background. Tailor every question and evaluation to their specific field and the role they are applying for.`;
+IMPORTANT: Adapt this interview to the candidate's stream, chosen domain, and target role. Do not assume a software engineering background. Tailor every question and evaluation to their specific background and goals.`;
   }
 
   async generateBlueprintFirstQuestion(resumeText, blueprint, studentContext) {
