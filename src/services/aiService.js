@@ -13,6 +13,7 @@ function cleanJsonResponse(text) {
   return match ? match[0] : stripped;
 }
 
+
 function clampScore(value) {
   const number = Number.parseInt(value, 10);
   if (Number.isNaN(number)) {
