@@ -10,6 +10,7 @@ import { InterviewReport, InterviewSession, JourneyInterview, StudentJourney, Us
 import { buildStudentWhere } from '../aptitude/utils/adminScope.js';
 import { extractTextFromPdf } from '../services/resumeParser.js';
 import { aiService } from '../services/aiService.js';
+import { sanitizeClientVideoMetrics } from '../services/mediaService.js';
 import { getBlueprintByNumber, BLUEPRINTS, LEVELS } from './blueprints.js';
 import fs from 'fs/promises';
 
@@ -306,7 +307,7 @@ router.get('/interview/blueprint/:sessionId', requireAuth, asyncHandler(async (r
 
 router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
-  const { session_id: sessionId, answer } = req.body || {};
+  const { session_id: sessionId, answer, video_metrics: rawVideoMetrics } = req.body || {};
   if (!sessionId || !answer) throw new HttpError(400, 'session_id and answer are required');
 
   const session = await InterviewSession.findOne({ where: { session_id: sessionId } });
@@ -323,13 +324,15 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   if (!blueprint) throw new HttpError(500, 'Blueprint not found');
 
   const studentContext = { stream: req.user?.stream || '', target_role: req.user?.interested_role || '' };
-  const evaluation = await aiService.evaluateBlueprintAnswer(session.current_question, answer, blueprint, null, studentContext);
+  const videoMetrics = sanitizeClientVideoMetrics(rawVideoMetrics);
+  const evaluation = await aiService.evaluateBlueprintAnswer(session.current_question, answer, blueprint, videoMetrics, studentContext);
 
   const historyEntry = {
     question_number: session.question_count,
     question: session.current_question,
     answer,
     evaluation,
+    video_metrics: videoMetrics,
     timestamp: new Date(),
   };
   const updatedHistory = [...(session.history || []), historyEntry];

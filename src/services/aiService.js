@@ -1,4 +1,5 @@
 import Groq from "groq-sdk";
+import crypto from "node:crypto";
 import { config } from "../config.js";
 import { HttpError } from "../utils/httpError.js";
 import { recordAiUsage } from "./aiUsageService.js";
@@ -33,13 +34,14 @@ class AiService {
   ];
 
     this.clients = Array.isArray(config.groqApiKeys) ? config.groqApiKeys.map(key => new Groq({ apiKey: key })) : [];
+    this.atsCache = new Map();
   }
 
   rebuildClients() {
     this.clients = Array.isArray(config.groqApiKeys) ? config.groqApiKeys.map(key => new Groq({ apiKey: key })) : [];
   }
 
-  async generateContent(prompt, feature = "interview_chat") {
+  async generateContent(prompt, feature = "interview_chat", options = {}) {
     if (this.clients.length === 0) {
       throw new HttpError(503, "Groq API key is not configured");
     }
@@ -53,7 +55,8 @@ class AiService {
           const response = await client.chat.completions.create({
             model,
             messages: [{ role: "user", content: prompt }],
-            temperature: 0.3
+            temperature: 0.3,
+            ...options
           });
           await recordAiUsage({
             provider: "groq",
@@ -109,30 +112,77 @@ class AiService {
   }
 
   async analyzeResume(resumeText) {
-    const prompt = `You are an ATS (Applicant Tracking System) expert.
-Analyze this resume and return a JSON with:
-1. ats_score (0-100)
-2. skills_found (array of skills extracted)
-3. improvements (array of 3-5 specific, actionable suggestions to improve the resume)
+    // Identical resume text must always produce an identical ATS result.
+    const hash = crypto.createHash("sha256").update(String(resumeText || "").trim()).digest("hex");
+    const cached = this.atsCache.get(hash);
+    if (cached) return cached;
+
+    const prompt = `You are an ATS (Applicant Tracking System) evaluator.
+Analyze the resume below and score SIX criteria, each an integer from 0-10, using EXACTLY this rubric:
+
+1. contact_info: 10 = email + phone + location + LinkedIn all present; 7 = email + phone; 4 = email only; 0 = none
+2. skills: 10 = dedicated skills section with 8+ role-relevant technical skills; 7 = 4-7 relevant skills; 4 = 1-3 skills or vague ("good communicator"); 0 = no skills listed
+3. experience: 10 = projects/work with technologies used AND measurable outcomes (%, numbers); 7 = specific projects with tech stack but no metrics; 4 = generic duties/responsibilities only; 0 = none
+4. education: 10 = degree + institution + year; 6 = degree + institution; 3 = degree only; 0 = missing
+5. formatting: 10 = clear section headers + consistent bullets + 1 page equivalent length; 6 = mostly structured with minor issues; 3 = dense unstructured paragraphs; 0 = unreadable
+6. keywords: 10 = strong action verbs (built, led, optimized) and industry terms throughout; 6 = some action verbs; 3 = passive language; 0 = none
 
 Resume:
-${resumeText.slice(0, 2000)}
+${String(resumeText || "").slice(0, 2000)}
 
 Return ONLY valid JSON:
 {
-  "ats_score": 0,
+  "contact_info": 0,
+  "skills": 0,
+  "experience": 0,
+  "education": 0,
+  "formatting": 0,
+  "keywords": 0,
   "skills_found": [],
   "improvements": []
 }`;
 
     try {
-      const text = await this.generateContent(prompt, "resume_ats_analysis");
+      const text = await this.generateContent(prompt, "resume_ats_analysis", {
+        temperature: 0,
+        seed: 42
+      });
       const result = JSON.parse(cleanJsonResponse(text));
-      return {
-        ats_score: result.ats_score ?? 50,
+
+      const clamp10 = (value) => {
+        const n = Number.parseInt(value, 10);
+        return Number.isNaN(n) ? 5 : Math.max(0, Math.min(10, n));
+      };
+
+      const breakdown = {
+        contact_info: clamp10(result.contact_info),
+        skills: clamp10(result.skills),
+        experience: clamp10(result.experience),
+        education: clamp10(result.education),
+        formatting: clamp10(result.formatting),
+        keywords: clamp10(result.keywords)
+      };
+
+      // Weighted sum computed in code so identical sub-scores yield an identical total.
+      const atsScore = Math.round(
+        breakdown.contact_info * 1.0 +
+        breakdown.skills * 2.5 +
+        breakdown.experience * 3.0 +
+        breakdown.education * 1.5 +
+        breakdown.formatting * 1.0 +
+        breakdown.keywords * 1.0
+      );
+
+      const analysis = {
+        ats_score: Math.max(0, Math.min(100, atsScore)),
+        breakdown,
         skills_found: Array.isArray(result.skills_found) ? result.skills_found : [],
         improvements: Array.isArray(result.improvements) ? result.improvements : []
       };
+
+      if (this.atsCache.size >= 200) this.atsCache.clear();
+      this.atsCache.set(hash, analysis);
+      return analysis;
     } catch (error) {
       throw new HttpError(500, `ATS analysis failed: ${error.message}`);
     }
@@ -191,16 +241,39 @@ Return ONLY the question text:`;
     }
   }
 
+  buildVideoAnalysisSection(videoMetrics) {
+    if (videoMetrics?.quality_flag !== "good") {
+      return `Video Analysis: Not available.
+Score confidence and body_language based solely on verbal delivery cues in the answer text (sentence structure, assertiveness, hedging words, coherence).
+IMPORTANT: body_language must stay within ±1 of the confidence score. Do NOT assign 0 or arbitrary values.`;
+    }
+
+    const eyeContact = (Number(videoMetrics.eye_contact || 0) * 10).toFixed(1);
+    const attention = (Number(videoMetrics.attention || 0) * 10).toFixed(1);
+    const stability = (Number(videoMetrics.stability || 0) * 10).toFixed(1);
+    const presence = Math.round(Number(videoMetrics.face_presence || 0) * 100);
+    const presenceScore = Math.min(10, presence / 10).toFixed(1);
+    const suggested = (
+      0.35 * Number(eyeContact) +
+      0.3 * Number(attention) +
+      0.2 * Number(stability) +
+      0.15 * Number(presenceScore)
+    ).toFixed(1);
+
+    return `Video Analysis (computed from the candidate's webcam while they answered):
+- Face presence : ${presence}% of frames had a visible face
+- Eye contact   : ${eyeContact}/10 (how well the face stayed centered toward camera)
+- Attention     : ${attention}/10 (engagement signals)
+- Posture steadiness: ${stability}/10
+- Visibility level  : ${videoMetrics.visibility || "unknown"}
+
+IMPORTANT: Score body_language primarily from these measured video signals:
+body_language ≈ round(0.35 × ${eyeContact} + 0.30 × ${attention} + 0.20 × ${stability} + 0.15 × ${presenceScore}) ≈ ${suggested}.
+Use this computed value (±1 at most for judgment adjustments). Do NOT assign 0 or arbitrary values.`;
+  }
+
   async evaluateAnswer(question, answer, videoMetrics = null) {
-    const videoSection = videoMetrics?.quality_flag === "good"
-      ? `Video Analysis (already converted to 0-10 scale for you):
-- Eye contact score : ${(Number(videoMetrics.eye_contact || 0) * 10).toFixed(1)}/10
-- Attention score   : ${(Number(videoMetrics.attention || 0) * 10).toFixed(1)}/10
-- Stability score   : ${(Number(videoMetrics.stability || 0) * 10).toFixed(1)}/10
-- Face presence     : ${Math.round(Number(videoMetrics.face_presence || 0) * 100)}% of the interview was visible on camera
-- Visibility level  : ${videoMetrics.visibility || "unknown"}`
-      : `Video Analysis: Not available or low quality.
-Score confidence and body_language based solely on the tone and phrasing of the answer text.`;
+    const videoSection = this.buildVideoAnalysisSection(videoMetrics);
 
     const prompt = `You are a strict technical interviewer evaluating a candidate's response in an AI-powered interview.
 
@@ -595,12 +668,7 @@ Return ONLY the question text:`;
   }
 
   async evaluateBlueprintAnswer(question, answer, blueprint, videoMetrics = null, studentContext) {
-    const videoSection = videoMetrics?.quality_flag === "good"
-      ? `Video Analysis:
-- Eye contact: ${(Number(videoMetrics.eye_contact || 0) * 10).toFixed(1)}/10
-- Attention: ${(Number(videoMetrics.attention || 0) * 10).toFixed(1)}/10
-- Stability: ${(Number(videoMetrics.stability || 0) * 10).toFixed(1)}/10`
-      : 'Video Analysis: Not available.';
+    const videoSection = this.buildVideoAnalysisSection(videoMetrics);
 
     const criteria = Object.entries(blueprint.evaluation_criteria || {})
       .map(([key, desc]) => `- ${key}: ${desc}`)

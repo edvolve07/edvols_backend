@@ -41,7 +41,8 @@ import {
   cleanupFiles,
   extractAudio,
   hasVideoStream,
-  lowQualityMetrics
+  lowQualityMetrics,
+  sanitizeClientVideoMetrics
 } from "./services/mediaService.js";
 import { generateAtsPdf, generatePerformancePdf } from "./services/pdfReports.js";
 import { HttpError, asyncHandler } from "./utils/httpError.js";
@@ -532,7 +533,9 @@ app.post("/api/answer_video", requireAuth, requireModuleAccess('ai_interview'), 
 
   try {
     const transcript = await transcriber.transcribe(renamedPath);
-    const videoMetrics = await hasVideoStream(renamedPath) ? await analyzeVideo(renamedPath) : lowQualityMetrics();
+    const serverMetrics = await hasVideoStream(renamedPath) ? await analyzeVideo(renamedPath) : lowQualityMetrics();
+    const clientMetrics = sanitizeClientVideoMetrics(req.body?.video_metrics);
+    const videoMetrics = clientMetrics?.quality_flag === "good" ? clientMetrics : serverMetrics;
     const response = await handleAnswer({ sessionId, answer: transcript, user: req.user, videoMetrics });
     res.json({ ...response, transcript });
   } finally {
@@ -567,7 +570,9 @@ app.post("/api/answer_video_with_audio", requireAuth, requireModuleAccess('ai_in
 
   try {
     const transcript = await transcriber.transcribe(renamedAudioPath);
-    const videoMetrics = await hasVideoStream(videoPath) ? await analyzeVideo(videoPath) : lowQualityMetrics();
+    const serverMetrics = await hasVideoStream(videoPath) ? await analyzeVideo(videoPath) : lowQualityMetrics();
+    const clientMetrics = sanitizeClientVideoMetrics(req.body?.video_metrics);
+    const videoMetrics = clientMetrics?.quality_flag === "good" ? clientMetrics : serverMetrics;
     const response = await handleAnswer({ sessionId, answer: transcript, user: req.user, videoMetrics });
     res.json({ ...response, transcript });
   } finally {
@@ -583,6 +588,8 @@ app.get("/api/session/:session_id", requireAuth, requireModuleAccess('ai_intervi
     question: session.current_question || "",
     question_number: session.question_count || 1,
     max_questions: session.max_questions ?? config.maxQuestions,
+    time_limit_minutes: Number(process.env.INTERVIEW_TIME_LIMIT_MINUTES)
+      || Math.ceil((session.max_questions ?? config.maxQuestions) * 3),
     status: session.status,
     domain: session.domain,
     role: session.role,

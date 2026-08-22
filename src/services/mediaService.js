@@ -85,3 +85,20 @@ export function lowQualityMetrics() {
     quality_flag: "poor"
   };
 }
+
+export function sanitizeClientVideoMetrics(input) {
+  if (!input || typeof input !== "object") return null;
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+  };
+  const metrics = {
+    face_presence: num(input.face_presence),
+    eye_contact: num(input.eye_contact),
+    attention: num(input.attention),
+    stability: num(input.stability),
+    visibility: ["good", "fair", "poor"].includes(input.visibility) ? input.visibility : "unknown",
+  };
+  metrics.quality_flag = metrics.face_presence > 0.5 && metrics.visibility !== "poor" ? "good" : "poor";
+  return metrics;
+}
