@@ -998,6 +998,34 @@ export class JourneyService {
       order: [['interview_number', 'ASC']],
     }) : [];
 
+    // Aggregate per-skill averages from completed interview reports (metrics are 0-10 → report as %)
+    const completedSessionIds = interviews
+      .filter(iv => iv.status === 'completed' && iv.session_id)
+      .map(iv => iv.session_id);
+
+    const METRIC_KEYS = ['confidence', 'body_language', 'knowledge', 'fluency', 'skill_relevance'];
+    const skillTotals = Object.fromEntries(METRIC_KEYS.map(k => [k, 0]));
+    let reportsCounted = 0;
+
+    if (completedSessionIds.length) {
+      const reports = await InterviewReport.findAll({
+        where: { session_id: { [Op.in]: completedSessionIds } },
+        attributes: ['session_id', 'metrics'],
+      });
+      for (const report of reports) {
+        const m = report.metrics || {};
+        if (!METRIC_KEYS.some(k => Number.isFinite(Number(m[k])))) continue;
+        reportsCounted += 1;
+        for (const k of METRIC_KEYS) {
+          skillTotals[k] += Number(m[k]) || 0;
+        }
+      }
+    }
+
+    const skillScores = reportsCounted > 0
+      ? Object.fromEntries(METRIC_KEYS.map(k => [k, Math.round((skillTotals[k] / reportsCounted) * 10)]))
+      : null;
+
     const accessLevel = journey?.journey_access_level || 0;
     const maxInterviews = this._getMaxInterviewsForAccess(accessLevel);
 
@@ -1013,7 +1041,16 @@ export class JourneyService {
         readiness_score: journey.readiness_score,
         status: journey.status,
         journey_access_level: journey.journey_access_level,
+        ...(skillScores ? {
+          confidence_score: skillScores.confidence,
+          body_language_score: skillScores.body_language,
+          technical_score: skillScores.knowledge,
+          communication_score: skillScores.fluency,
+          skill_relevance_score: skillScores.skill_relevance,
+        } : {}),
       } : null,
+      interview_skill_averages: skillScores,
+      interview_reports_counted: reportsCounted,
       subscription: {
         id: journey?._id || null,
         plan_key: accessLevel > 0 ? `level_1_${accessLevel}` : null,
