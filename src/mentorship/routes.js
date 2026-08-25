@@ -438,8 +438,8 @@ router.post('/interview/end', requireAuth, asyncHandler(async (req, res) => {
       grade_label: pct >= 80 ? 'Excellent' : pct >= 60 ? 'Good' : pct >= 40 ? 'Average' : 'Needs Improvement',
       average_score: avgAll,
       blueprint_avg: avgBlueprintScore,
+      metrics: avgMetrics,
     },
-    metrics: avgMetrics,
     question_breakdown: history.map((h) => ({
       question: h.question,
       answer: h.answer,

@@ -1010,10 +1010,10 @@ export class JourneyService {
     if (completedSessionIds.length) {
       const reports = await InterviewReport.findAll({
         where: { session_id: { [Op.in]: completedSessionIds } },
-        attributes: ['session_id', 'metrics'],
+        attributes: ['session_id', 'overall'],
       });
       for (const report of reports) {
-        const m = report.metrics || {};
+        const m = report.overall?.metrics || {};
         if (!METRIC_KEYS.some(k => Number.isFinite(Number(m[k])))) continue;
         reportsCounted += 1;
         for (const k of METRIC_KEYS) {
