@@ -3,11 +3,13 @@ import { v4 as uuidv4 } from 'uuid';
 import { AccessToken, RoomServiceClient, AgentDispatchClient } from 'livekit-server-sdk';
 import { requireAuth, requireModuleAccess } from '../aptitude/middleware/auth.js';
 import { HttpError, asyncHandler } from '../utils/httpError.js';
-import { nimService } from '../services/nimService.js';
 import { aiService } from '../services/aiService.js';
 import { config } from '../config.js';
+import { CommunicationSession } from '../database/models/CommunicationSession.js';
 
-const commAi = config.nvidiaApiKey ? nimService : aiService;
+// Communication AI runs on Groq (aiService); the NVIDIA path (nimService) is
+// unavailable — dead models + speech-host DNS failures.
+const commAi = aiService;
 const router = Router();
 
 const livekitHttpUrl = config.livekitUrl
@@ -44,9 +46,10 @@ router.post('/rejoin-room', requireAuth, requireModuleAccess('communication'), a
 }));
 
 router.post('/create-room', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
-  const { category } = req.body || {};
+  const { category, mode } = req.body || {};
   const roomName = `comm-${uuidv4().slice(0, 8)}`;
   const resolvedCategory = category || 'Everyday Conversation & Small Talk';
+  const resolvedMode = mode || 'general';
 
   await roomClient.createRoom({ name: roomName, emptyTimeout: 300 });
 
@@ -57,9 +60,25 @@ router.post('/create-room', requireAuth, requireModuleAccess('communication'), a
   participantToken.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
   const token = await participantToken.toJwt();
 
+  // Persist the session (session_id = room name) so exchanges can be synced
+  // during the call and a report finalized after it. `context` holds the mode.
+  await CommunicationSession.create({
+    session_id: roomName,
+    student_id: req.user._id,
+    student_name: req.user.name || '',
+    student_email: req.user.email || '',
+    category: resolvedCategory,
+    context: resolvedMode,
+    history: [],
+    exchange_count: 0,
+    max_exchanges: 6,
+    status: 'active',
+  });
+
   dispatchClient.createDispatch(roomName, 'interview-agent', {
     metadata: JSON.stringify({
       category: resolvedCategory,
+      mode: resolvedMode,
       userIdentity: req.user._id,
     }),
   }).catch((err) => {
@@ -68,9 +87,56 @@ router.post('/create-room', requireAuth, requireModuleAccess('communication'), a
 
   res.json({
     room: roomName,
+    conversation_id: roomName,
     token,
     category: resolvedCategory,
+    mode: resolvedMode,
   });
+}));
+
+// ── Conversation persistence for LiveKit voice sessions ───────────────
+
+router.get('/conversation/:id', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
+  const session = await CommunicationSession.findOne({ where: { session_id: req.params.id } });
+  if (!session) throw new HttpError(404, 'Conversation not found');
+  if (session.student_id !== req.user._id && !['admin', 'master_admin'].includes(req.user.role)) {
+    throw new HttpError(403, 'Not your conversation');
+  }
+  res.json({
+    conversation_id: session.session_id,
+    room_name: session.session_id,
+    mode: session.context || 'general',
+    category: session.category,
+    status: session.status,
+    exchanges: session.history || [],
+  });
+}));
+
+router.post('/conversation/:id/sync', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
+  const { exchanges } = req.body || {};
+  if (!Array.isArray(exchanges)) throw new HttpError(400, 'exchanges array is required');
+  const session = await CommunicationSession.findOne({ where: { session_id: req.params.id } });
+  if (!session) throw new HttpError(404, 'Conversation not found');
+  if (session.student_id !== req.user._id) throw new HttpError(403, 'Not your conversation');
+
+  await CommunicationSession.update(
+    { history: exchanges, exchange_count: exchanges.length },
+    { where: { session_id: req.params.id } },
+  );
+  res.json({ ok: true, synced: exchanges.length });
+}));
+
+router.post('/end-conversation', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
+  const { room, conversation_id: conversationId } = req.body || {};
+  const sessionId = conversationId || room;
+  if (sessionId) {
+    await CommunicationSession.update(
+      { status: 'ended' },
+      { where: { session_id: sessionId, student_id: req.user._id } },
+    );
+  }
+  if (room) await roomClient.deleteRoom(room).catch(() => {});
+  res.json({ ok: true });
 }));
 
 router.post('/generate-scenario', asyncHandler(async (req, res) => {
