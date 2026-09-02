@@ -507,6 +507,85 @@ router.get('/reports', requireAuth, requireModuleAccess('communication'), asyncH
   });
 }));
 
+const PERFORMANCE_LEVEL_MAP = {
+  Excellent: 'Excellent',
+  Good: 'Advanced',
+  Average: 'Intermediate',
+  Fair: 'Beginner',
+  'Needs Improvement': 'Beginner',
+};
+
+const MODE_LABELS = {
+  general: 'General',
+  interview_prep: 'Interview Prep',
+};
+
+function avgEvaluation(evaluation = {}) {
+  const values = Object.values(evaluation).map(Number).filter((n) => Number.isFinite(n));
+  if (!values.length) return 0;
+  return Number((values.reduce((s, v) => s + v, 0) / values.length).toFixed(1));
+}
+
+// The report page (CommunicationReport.jsx) renders a richer schema than
+// generateCommunicationReport produces. This maps the stored report onto it so
+// existing and new reports both display without regenerating anything.
+function toReportView(reportInstance, session) {
+  const report = typeof reportInstance.toJSON === 'function' ? reportInstance.toJSON() : { ...reportInstance };
+  const overall = report.overall || {};
+  const metrics = overall.metrics || {};
+  const breakdown = Array.isArray(report.exchange_breakdown) ? report.exchange_breakdown : [];
+  const convo = Array.isArray(report.conversation_log) ? report.conversation_log : [];
+  const insights = report.category_insights || {};
+
+  let durationSeconds = 0;
+  if (session?.created_at && session?.updated_at) {
+    durationSeconds = Math.max(0, Math.round((new Date(session.updated_at) - new Date(session.created_at)) / 1000));
+  }
+
+  const overallScores = {};
+  const communicationMetrics = {};
+  for (const [key, value] of Object.entries(metrics)) {
+    const score = Number(value) || 0;
+    overallScores[key] = { score, label: '' };
+    communicationMetrics[key] = { score };
+  }
+
+  const responseAnalysis = breakdown.map((item, idx) => ({
+    exchange_number: item.number ?? idx + 1,
+    analysis: item.feedback || '',
+    strengths: Array.isArray(item.strengths) ? item.strengths : [],
+    weaknesses: [],
+    suggested_improvements: Array.isArray(item.improvements) ? item.improvements : [],
+    communication_score: avgEvaluation(item.evaluation),
+  }));
+
+  const transcript = convo.map((item, idx) => ({
+    exchange: item.exchange ?? idx + 1,
+    coach: item.interviewer || '',
+    student: item.student || '',
+  }));
+
+  const totalTurns = breakdown.length || convo.length;
+
+  return {
+    ...report,
+    session_summary: {
+      communication_mode: MODE_LABELS[session?.context] || session?.context || 'N/A',
+      scenario: report.category || 'N/A',
+      duration: durationSeconds,
+      total_turns: totalTurns,
+      overall_communication_score: Number(overall.percentage) || 0,
+      performance_level: PERFORMANCE_LEVEL_MAP[overall.grade_label] || 'Beginner',
+    },
+    overall_scores: overallScores,
+    communication_metrics: communicationMetrics,
+    response_analysis: responseAnalysis,
+    transcript,
+    overall_feedback: [insights.category_mastery, insights.key_takeaway].filter(Boolean).join('\n\n'),
+    final_remarks: insights.recommended_focus || '',
+  };
+}
+
 router.get('/reports/:session_id', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
   const report = await CommunicationReport.findOne({
     where: { session_id: req.params.session_id },
@@ -516,7 +595,8 @@ router.get('/reports/:session_id', requireAuth, requireModuleAccess('communicati
   if (!['admin', 'master_admin'].includes(req.user.role) && report.student_id !== req.user._id) {
     throw new HttpError(403, 'Not your report');
   }
-  res.json(report);
+  const session = await CommunicationSession.findOne({ where: { session_id: req.params.session_id } });
+  res.json(toReportView(report, session));
 }));
 
 router.get('/categories', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
