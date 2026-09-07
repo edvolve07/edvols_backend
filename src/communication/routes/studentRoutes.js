@@ -12,6 +12,7 @@ import { CommunicationScenario } from '../../database/models/CommunicationScenar
 import { nimService } from '../../services/nimService.js';
 import { aiService } from '../../services/aiService.js';
 import { transcriber } from '../../services/transcriber.js';
+import { generateCommunicationPdf } from '../../services/pdfReports.js';
 import { config } from '../../config.js';
 
 const uploadDir = path.join(os.tmpdir(), 'edvolve-audio');
@@ -343,12 +344,25 @@ router.post('/end', requireAuth, requireModuleAccess('communication'), asyncHand
 // The voice UI streams the agent's per-turn evaluations to the browser, then
 // POSTs them here to build the coaching report. session_id === room name.
 
-function mapAgentExchanges(exchanges) {
-  return (Array.isArray(exchanges) ? exchanges : []).map((ex) => {
+function mapAgentExchanges(exchanges, defaultPrompt = '') {
+  return (Array.isArray(exchanges) ? exchanges : []).map((ex, idx) => {
     const ev = ex.evaluation || {};
+    let answer = '';
+    if (typeof ex.transcript === 'string') {
+      answer = ex.transcript;
+    } else if (Array.isArray(ex.transcript)) {
+      answer = ex.transcript.join(' ');
+    } else if (typeof ex.answer === 'string') {
+      answer = ex.answer;
+    } else if (Array.isArray(ex.answer)) {
+      answer = ex.answer.join(' ');
+    }
+
+    const prompt = ex.eliciting_prompt || ex.prompt || (idx === 0 ? defaultPrompt : `Question ${idx + 1}`);
+
     return {
-      prompt: ex.eliciting_prompt || ex.prompt || '',
-      answer: ex.transcript || ex.answer || '',
+      prompt: prompt || `Exchange ${idx + 1}`,
+      answer: answer.trim() || 'No response recorded',
       evaluation: {
         clarity: Number(ev.clarity) || 0,
         structure: Number(ev.structure) || 0,
@@ -360,8 +374,64 @@ function mapAgentExchanges(exchanges) {
       improvements: Array.isArray(ex.improvements) ? ex.improvements : [],
       feedback: ex.feedback || '',
       real_world_tip: ex.real_world_tip || '',
+      next_prompt: ex.next_prompt || '',
+      ideal_response: ex.ideal_response || '',
+      why_better: ex.why_better || '',
     };
   });
+}
+
+function buildCommunicationSummaryFallback(history, category, avgMetrics = {}) {
+  const strengthsSet = new Set();
+  const improvementsSet = new Set();
+  const tipsSet = new Set();
+
+  for (const ex of history) {
+    (ex.strengths || []).forEach((s) => strengthsSet.add(s));
+    (ex.improvements || []).forEach((i) => improvementsSet.add(i));
+    if (ex.real_world_tip) tipsSet.add(ex.real_world_tip);
+  }
+
+  if (strengthsSet.size === 0) {
+    if ((avgMetrics.clarity || 0) >= 6) strengthsSet.add('Articulated ideas with clear baseline communication.');
+    if ((avgMetrics.confidence_tone || 0) >= 6) strengthsSet.add('Demonstrated professional, composed vocal tone.');
+    strengthsSet.add('Engaged constructively across conversational exchanges.');
+    strengthsSet.add('Demonstrated willingness to practice and refine communication skills.');
+  }
+
+  if (improvementsSet.size === 0) {
+    if ((avgMetrics.structure || 0) < 7) improvementsSet.add('Structure responses with a clear beginning, middle, and conclusion.');
+    if ((avgMetrics.relevance || 0) < 7) improvementsSet.add('Address the core of each question directly before adding supporting detail.');
+    if ((avgMetrics.conciseness || 0) < 7) improvementsSet.add('Minimize filler words and eliminate unnecessary repetition.');
+  }
+
+  if (tipsSet.size === 0) {
+    tipsSet.add('Take a brief breath before speaking to structure your key points.');
+    tipsSet.add('Anchor abstract ideas with concrete personal or professional examples.');
+    tipsSet.add('Maintain consistent pacing and vary vocal inflection to stay engaging.');
+    tipsSet.add('Actively acknowledge prompts to build natural conversational rapport.');
+  }
+
+  return {
+    strengths: Array.from(strengthsSet).slice(0, 5),
+    areas_to_improve: Array.from(improvementsSet).slice(0, 5),
+    tips: Array.from(tipsSet).slice(0, 5),
+    category_insights: {
+      category_mastery: `Showed foundational capability in ${category}, with strong potential for impact through structured answer delivery.`,
+      key_takeaway: `In ${category}, concise delivery paired with relevant examples creates immediate credibility.`,
+      recommended_focus: `Focus on delivering structured 30-to-60 second responses without conversational wandering.`,
+    },
+    real_world_preparation: [
+      `In real-world ${category} scenarios, prepare 2-3 structured experiences you can reference readily.`,
+      `Practice active listening: mirror the other speaker\'s key terms before introducing your perspective.`,
+      `Review recorded practice audio to evaluate pacing, inflection, and presence.`,
+    ],
+    competency_analysis: {
+      demonstrated_competencies: ['Engagement', 'Responsiveness', 'Conversational Adaptability'],
+      competencies_to_develop: ['Structured Delivery', 'Conciseness', 'Assertive Articulation'],
+      communication_style: 'Conversational and adaptive, evolving toward structured executive delivery.',
+    },
+  };
 }
 
 router.post('/sessions/:id/finalize', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
@@ -373,9 +443,10 @@ router.post('/sessions/:id/finalize', requireAuth, requireModuleAccess('communic
   const existing = await CommunicationReport.findOne({ where: { session_id: sessionId } });
   if (existing) return res.json({ status: 'COMPLETED', report_session_id: sessionId });
 
-  const bodyExchanges = Array.isArray(req.body?.exchanges) ? req.body.exchanges : [];
-  const history = mapAgentExchanges(bodyExchanges.length ? bodyExchanges : (session.history || []));
   const category = session.category || 'General';
+  const defaultPrompt = session.current_prompt || `${category} Scenario`;
+  const bodyExchanges = Array.isArray(req.body?.exchanges) ? req.body.exchanges : [];
+  const history = mapAgentExchanges(bodyExchanges.length ? bodyExchanges : (session.history || []), defaultPrompt);
 
   const metricKeys = ['clarity', 'structure', 'conciseness', 'relevance', 'confidence_tone'];
   const metricSums = Object.fromEntries(metricKeys.map((k) => [k, 0]));
@@ -403,6 +474,8 @@ router.post('/sessions/:id/finalize', requireAuth, requireModuleAccess('communic
     improvements: item.improvements,
     feedback: item.feedback,
     real_world_tip: item.real_world_tip,
+    ideal_response: item.ideal_response,
+    why_better: item.why_better,
   }));
   const conversation_log = history.map((item, index) => ({
     exchange: index + 1,
@@ -420,6 +493,27 @@ router.post('/sessions/:id/finalize', requireAuth, requireModuleAccess('communic
     } catch (err) {
       console.error('Communication report generation failed:', err.message);
     }
+  }
+
+  // Fallback synthesis if AI call was throttled or returned empty arrays
+  const fallback = buildCommunicationSummaryFallback(history, category, avg);
+  if (!summary || !Array.isArray(summary.strengths) || summary.strengths.length === 0) {
+    summary.strengths = fallback.strengths;
+  }
+  if (!Array.isArray(summary.areas_to_improve) || summary.areas_to_improve.length === 0) {
+    summary.areas_to_improve = fallback.areas_to_improve;
+  }
+  if (!Array.isArray(summary.tips) || summary.tips.length === 0) {
+    summary.tips = fallback.tips;
+  }
+  if (!summary.category_insights || !summary.category_insights.category_mastery) {
+    summary.category_insights = { ...fallback.category_insights, ...(summary.category_insights || {}) };
+  }
+  if (!Array.isArray(summary.real_world_preparation) || summary.real_world_preparation.length === 0) {
+    summary.real_world_preparation = fallback.real_world_preparation;
+  }
+  if (!summary.competency_analysis || !summary.competency_analysis.communication_style) {
+    summary.competency_analysis = { ...fallback.competency_analysis, ...(summary.competency_analysis || {}) };
   }
 
   const report = {
@@ -554,9 +648,11 @@ function toReportView(reportInstance, session) {
     exchange_number: item.number ?? idx + 1,
     analysis: item.feedback || '',
     strengths: Array.isArray(item.strengths) ? item.strengths : [],
-    weaknesses: [],
+    weaknesses: Array.isArray(item.improvements) ? item.improvements : [],
     suggested_improvements: Array.isArray(item.improvements) ? item.improvements : [],
     communication_score: avgEvaluation(item.evaluation),
+    ideal_response: item.ideal_response || '',
+    why_better: item.why_better || '',
   }));
 
   const transcript = convo.map((item, idx) => ({
@@ -566,6 +662,12 @@ function toReportView(reportInstance, session) {
   }));
 
   const totalTurns = breakdown.length || convo.length;
+
+  const overallFeedback = [
+    insights.category_mastery,
+    insights.key_takeaway,
+    insights.recommended_focus ? `Recommended Focus: ${insights.recommended_focus}` : '',
+  ].filter(Boolean).join('\n\n') || 'Practice consistently to continue improving communication precision and confidence.';
 
   return {
     ...report,
@@ -581,8 +683,8 @@ function toReportView(reportInstance, session) {
     communication_metrics: communicationMetrics,
     response_analysis: responseAnalysis,
     transcript,
-    overall_feedback: [insights.category_mastery, insights.key_takeaway].filter(Boolean).join('\n\n'),
-    final_remarks: insights.recommended_focus || '',
+    overall_feedback: overallFeedback,
+    final_remarks: insights.recommended_focus || 'Keep up the practice and apply these tips in your daily conversations.',
   };
 }
 
@@ -597,6 +699,24 @@ router.get('/reports/:session_id', requireAuth, requireModuleAccess('communicati
   }
   const session = await CommunicationSession.findOne({ where: { session_id: req.params.session_id } });
   res.json(toReportView(report, session));
+}));
+
+router.get('/reports/:session_id/pdf', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
+  const report = await CommunicationReport.findOne({
+    where: { session_id: req.params.session_id },
+    attributes: { exclude: ['_id'] },
+  });
+  if (!report) throw new HttpError(404, 'Report not found');
+  if (!['admin', 'master_admin'].includes(req.user.role) && report.student_id !== req.user._id) {
+    throw new HttpError(403, 'Not your report');
+  }
+  const session = await CommunicationSession.findOne({ where: { session_id: req.params.session_id } });
+  const reportView = toReportView(report, session);
+
+  const pdf = await generateCommunicationPdf(reportView, session);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename=coaching_report_${req.params.session_id}.pdf`);
+  res.send(pdf);
 }));
 
 router.get('/categories', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {

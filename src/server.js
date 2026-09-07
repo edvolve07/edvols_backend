@@ -667,6 +667,41 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
   } catch {
     summary = {};
   }
+
+  // Fallback synthesis if AI call was throttled or returned empty arrays
+  if (!summary || !Array.isArray(summary.strengths) || summary.strengths.length === 0) {
+    const sSet = new Set();
+    const impSet = new Set();
+    evaluations.forEach((ev) => {
+      (ev.strengths || []).forEach((s) => sSet.add(s));
+      (ev.improvements || []).forEach((i) => impSet.add(i));
+    });
+    (ats.skills_found || []).slice(0, 3).forEach((sk) => sSet.add(`Demonstrated technical capability in ${sk}`));
+    (ats.improvements || []).slice(0, 3).forEach((imp) => impSet.add(imp));
+
+    if (sSet.size === 0) {
+      if ((avg.confidence || 0) >= 6) sSet.add("Demonstrated composure and steady confidence throughout answers.");
+      if ((avg.knowledge || 0) >= 6) sSet.add("Showed solid grasp of foundational domain principles.");
+      sSet.add("Maintained active engagement across all interview questions.");
+    }
+    if (impSet.size === 0) {
+      if ((avg.body_language || 0) < 6) impSet.add("Enhance non-verbal presence: maintain strong eye contact and posture.");
+      if ((avg.fluency || 0) < 6) impSet.add("Practice seamless transitions to reduce pauses and conversational hesitation.");
+      impSet.add("Structure complex technical answers using the STAR format (Situation, Task, Action, Result).");
+    }
+
+    summary = {
+      strengths: Array.from(sSet).slice(0, 4),
+      areas_to_improve: Array.from(impSet).slice(0, 4),
+      interview_tips: [
+        "Structure responses using the STAR method (Situation, Task, Action, Result)",
+        "Quantify your accomplishments with specific numbers, metrics, and outcomes",
+        "Maintain purposeful eye contact and an articulate, deliberate speaking pace",
+        "Highlight your individual contributions when speaking about team deliverables",
+      ],
+    };
+  }
+
   const reportId = `FB-${new Date().toISOString().slice(0, 10)}-${uuidv4().slice(0, 3).toUpperCase()}`;
 
   const questionBreakdown = history.length

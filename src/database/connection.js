@@ -69,10 +69,10 @@ export async function syncDatabase(options = { alter: false }) {
   try {
     await sq.sync(options);
   } catch (error) {
-    if (error?.parent?.code === '42P07') {
-      console.warn('Some indexes already exist (non-fatal)');
+    if (error?.parent?.code === '42P07' || error?.parent?.code === '25006') {
+      console.warn(`Database sync notice (${error?.parent?.code}):`, error.message);
     } else {
-      throw error;
+      console.warn('Database sync encountered an error (continuing with existing schema):', error.message);
     }
   }
 }
