@@ -29,20 +29,94 @@ const dispatchClient = new AgentDispatchClient(
 );
 
 router.post('/rejoin-room', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
-  const { room } = req.body || {};
-  if (!room) throw new HttpError(400, 'room is required');
+  const { room, conversation_id } = req.body || {};
+  const sessionId = conversation_id || room;
+  if (!sessionId) throw new HttpError(400, 'room or conversation_id is required');
 
-  const rooms = await roomClient.listRooms([room]);
-  if (!rooms.length) throw new HttpError(404, 'Room not found');
+  // Find the session in the database
+  const session = await CommunicationSession.findOne({ where: { session_id: sessionId } });
+  if (!session) {
+    throw new HttpError(404, 'Session not found');
+  }
+  if (session.student_id !== req.user._id && !['admin', 'master_admin'].includes(req.user.role)) {
+    throw new HttpError(403, 'Not your conversation');
+  }
+  if (session.status === 'ended') {
+    throw new HttpError(400, 'Session has already ended');
+  }
 
+  const roomName = session.session_id;
+
+  // 1. Check if the room currently exists in LiveKit
+  let roomActive = false;
+  try {
+    const rooms = await roomClient.listRooms([roomName]);
+    if (rooms && rooms.length > 0) {
+      roomActive = true;
+    }
+  } catch (err) {
+    console.warn('[rejoin-room] Error checking room in LiveKit:', err.message);
+  }
+
+  // 2. If the room does not exist in LiveKit (auto-closed when participants disconnected), recreate it
+  if (!roomActive) {
+    try {
+      await roomClient.createRoom({ name: roomName, emptyTimeout: 300 });
+      console.log(`[rejoin-room] Recreated room ${roomName} in LiveKit`);
+    } catch (err) {
+      console.warn('[rejoin-room] Error creating room in LiveKit:', err.message);
+    }
+  }
+
+  // 3. Ensure the AI agent is dispatched to the room
+  let hasDispatch = false;
+  try {
+    const dispatches = await dispatchClient.listDispatch(roomName);
+    if (dispatches && dispatches.length > 0) {
+      hasDispatch = true;
+    }
+  } catch (err) {
+    // If no active dispatches exist, listDispatch may return empty or throw
+  }
+
+  if (!hasDispatch) {
+    const history = session.history || [];
+    const lastExchange = history[history.length - 1];
+    const currentPrompt = lastExchange?.next_prompt || session.current_prompt || '';
+    const exchangeCount = session.exchange_count ?? history.length;
+
+    dispatchClient.createDispatch(roomName, 'interview-agent', {
+      metadata: JSON.stringify({
+        category: session.category,
+        mode: session.context || 'general',
+        userIdentity: req.user._id,
+        isRejoin: true,
+        exchangeCount,
+        currentPrompt,
+      }),
+    }).then(() => {
+      console.log(`[rejoin-room] Re-dispatched interview-agent to room ${roomName} (exchanges: ${exchangeCount})`);
+    }).catch((err) => {
+      console.error('[rejoin-room] Failed to re-dispatch agent on rejoin:', err.message);
+    });
+  }
+
+  // 4. Generate participant token for the rejoining student
   const token = new AccessToken(config.livekitApiKey, config.livekitApiSecret, {
     identity: req.user._id,
     name: req.user.name || 'Student',
   });
-  token.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: true });
+  token.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
   const jwt = await token.toJwt();
 
-  res.json({ room, token: jwt });
+  res.json({
+    room: roomName,
+    conversation_id: session.session_id,
+    token: jwt,
+    category: session.category,
+    mode: session.context || 'general',
+    exchanges: session.history || [],
+  });
 }));
 
 router.post('/create-room', requireAuth, requireModuleAccess('communication'), asyncHandler(async (req, res) => {
