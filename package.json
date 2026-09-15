@@ -13,7 +13,9 @@
     "curate:programming": "node src/programming/seed/curateProblems.js",
     "normalize:programming-leetcode": "node src/programming/seed/normalizeLeetcodeStyleProblems.js",
     "cleanup:programming-headings": "node src/programming/seed/removeHeadingProblems.js",
-    "migrate:institutions": "node scripts/migrate-institutions.js"
+    "migrate:institutions": "node scripts/migrate-institutions.js",
+    "seed:placement": "node scripts/seed-placement-data.js",
+    "test:placement": "node tests/scoringEngine.test.js && node tests/cache.test.js && node tests/rubricAndValidation.test.js"
   },
   "engines": {
     "node": ">=20"

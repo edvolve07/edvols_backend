@@ -31,6 +31,7 @@ import subscriptionRoutes from "./subscription/routes.js";
 import helpRoutes from "./help/routes.js";
 import referralRoutes from "./referral/routes.js";
 import referralAdminRoutes from "./referral/adminRoutes.js";
+import placementRoutes from "./placement/routes.js";
 import { getCodeRunnerHealth } from "./programming/services/executionService.js";
 import { aiService } from "./services/aiService.js";
 import { extractTextFromPdf } from "./services/resumeParser.js";
@@ -1039,6 +1040,7 @@ app.use("/api/subscription", subscriptionRoutes);
 app.use("/api/help", helpRoutes);
 app.use("/api/referral", referralRoutes);
 app.use("/api/master/referral", referralAdminRoutes);
+app.use("/api/placement", placementRoutes);
 
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
