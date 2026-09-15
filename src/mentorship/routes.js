@@ -3,6 +3,7 @@ import multer from 'multer';
 import PDFDocument from 'pdfkit';
 import { v4 as uuidv4 } from 'uuid';
 import { journeyService } from './journeyService.js';
+import { commitInterviewAnswer } from '../services/interviewState.js';
 import { requireAuth, requireRole } from '../aptitude/middleware/auth.js';
 import { asyncHandler } from '../utils/httpError.js';
 import { HttpError } from '../utils/httpError.js';
@@ -313,6 +314,9 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   const session = await InterviewSession.findOne({ where: { session_id: sessionId } });
   if (!session) throw new HttpError(404, 'Session not found');
   if (session.student_id !== studentId) throw new HttpError(403, 'Not your session');
+  if (req.body.question_number != null && Number(req.body.question_number) !== session.question_count) {
+    throw new HttpError(409, 'This question was already submitted. Reload the session to continue.');
+  }
   if (session.status !== 'active') throw new HttpError(400, 'Interview already completed');
 
   const journeyInt = await JourneyInterview.findOne({
@@ -339,12 +343,8 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   const maxQuestions = Number(process.env.MAX_QUESTIONS || 10);
   const isLast = session.question_count >= maxQuestions;
 
-  await session.update({
-    history: updatedHistory,
-    ...(isLast ? { status: 'completed' } : {}),
-  });
-
   if (isLast) {
+    await commitInterviewAnswer(session, { history: updatedHistory, status: 'completed' });
     return res.json({
       completed: true,
       feedback: evaluation.feedback || '',
@@ -374,7 +374,8 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
 
   const nextQuestionNumber = session.question_count + 1;
 
-  await session.update({
+  await commitInterviewAnswer(session, {
+    history: updatedHistory,
     current_question: nextQuestion,
     question_count: nextQuestionNumber,
   });
@@ -461,9 +462,9 @@ router.post('/interview/end', requireAuth, asyncHandler(async (req, res) => {
     created_at: new Date(),
   };
 
-  const report = await InterviewReport.create(reportData);
+  const [report] = await InterviewReport.findOrCreate({ where: { session_id: sessionId }, defaults: reportData });
   await session.update({ status: 'completed' });
-  await journeyService.completeInterview(studentId, sessionId, pct, reportData.overall.grade);
+  await journeyService.completeInterview(studentId, sessionId, report.overall.percentage, report.overall.grade);
 
   res.json(report);
 }));

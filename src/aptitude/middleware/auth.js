@@ -26,7 +26,7 @@ export async function requireAuth(req, _res, next) {
     req.user = user;
     next();
   } catch (error) {
-    next(error.name === 'JsonWebTokenError' ? unauthorized('Invalid session') : error);
+    next(['JsonWebTokenError', 'TokenExpiredError', 'NotBeforeError'].includes(error.name) ? unauthorized('Invalid session') : error);
   }
 }
 

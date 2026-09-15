@@ -15,7 +15,8 @@
     "cleanup:programming-headings": "node src/programming/seed/removeHeadingProblems.js",
     "migrate:institutions": "node scripts/migrate-institutions.js",
     "seed:placement": "node scripts/seed-placement-data.js",
-    "test:placement": "node tests/scoringEngine.test.js && node tests/cache.test.js && node tests/rubricAndValidation.test.js"
+    "test:placement": "node tests/scoringEngine.test.js && node tests/cache.test.js && node tests/rubricAndValidation.test.js && node tests/logicRegression.test.js",
+    "test:interview-state": "node tests/interviewState.test.js"
   },
   "engines": {
     "node": ">=20"

@@ -180,20 +180,21 @@ export class JourneyService {
     return result;
   }
 
-  async getAvailableInterview(studentId) {
-    const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+  async getAvailableInterview(studentId, transaction) {
+    const journey = await StudentJourney.findOne({ where: { student_id: studentId }, transaction });
     if (!journey) return null;
 
     const interviews = await JourneyInterview.findAll({
       where: { student_id: studentId, status: 'completed' },
       order: [['interview_number', 'DESC']],
+      transaction,
     });
 
     const completedNumbers = new Set(interviews.map(iv => iv.interview_number));
 
     for (const blueprint of BLUEPRINTS) {
       if (!completedNumbers.has(blueprint.interview_number) && blueprint.level <= journey.journey_access_level) {
-        const dbBp = await JourneyBlueprint.findOne({ where: { interview_number: blueprint.interview_number } });
+        const dbBp = await JourneyBlueprint.findOne({ where: { interview_number: blueprint.interview_number }, transaction });
         return {
           interview_number: blueprint.interview_number,
           blueprint_id: dbBp?._id || null,
@@ -366,8 +367,11 @@ export class JourneyService {
   }
 
   async completeInterview(studentId, sessionId, score, grade) {
+    return getSequelize().transaction(async transaction => {
+    const journey = await StudentJourney.findOne({ where: { student_id: studentId }, transaction, lock: transaction.LOCK.UPDATE });
+    if (!journey) throw new Error('Journey not found');
     const journeyInt = await JourneyInterview.findOne({
-      where: { session_id: sessionId, student_id: studentId }
+      where: { session_id: sessionId, student_id: studentId }, transaction
     });
     if (!journeyInt) throw new Error('Journey interview not found');
 
@@ -375,16 +379,17 @@ export class JourneyService {
       status: 'completed',
       overall_score: score || 0,
       grade: grade || '',
-      completed_at: new Date(),
-    });
+      completed_at: journeyInt.completed_at || new Date(),
+    }, { transaction });
 
     const completedCount = await JourneyInterview.count({
-      where: { student_id: studentId, status: 'completed' }
+      where: { student_id: studentId, status: 'completed' }, transaction
     });
 
     const allCompleted = await JourneyInterview.findAll({
       where: { student_id: studentId, status: 'completed' },
-      attributes: ['overall_score'],
+      attributes: ['overall_score', 'completed_at'],
+      transaction,
     });
 
     const avgScore = allCompleted.length > 0
@@ -398,7 +403,7 @@ export class JourneyService {
       }
     }
 
-    const nextInterview = await this.getAvailableInterview(studentId);
+    const nextInterview = await this.getAvailableInterview(studentId, transaction);
     const readinessScore = this.calculateReadiness(completedCount, avgScore, allCompleted);
 
     await StudentJourney.update({
@@ -407,10 +412,10 @@ export class JourneyService {
       current_interview_number: nextInterview?.interview_number || null,
       overall_score: Math.round(avgScore * 10) / 10,
       readiness_score: readinessScore,
-      last_interview_at: new Date(),
+      last_interview_at: new Date(Math.max(...allCompleted.map(iv => new Date(iv.completed_at || 0).getTime()))),
       status: completedCount >= 24 ? 'completed' : 'in_progress',
-      completed_at: completedCount >= 24 ? new Date() : null,
-    }, { where: { student_id: studentId } });
+      completed_at: completedCount >= 24 ? (journey.completed_at || new Date()) : null,
+    }, { where: { student_id: studentId }, transaction });
 
     return {
       completed: true,
@@ -422,6 +427,7 @@ export class JourneyService {
       next_interview: nextInterview,
       journey_completed: completedCount >= 24,
     };
+    });
   }
 
   calculateReadiness(completedCount, avgScore, completedInterviews) {

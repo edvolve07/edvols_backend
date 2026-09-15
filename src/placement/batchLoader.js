@@ -39,6 +39,8 @@ import {
   generateScoringExplanation,
 } from './scoringEngine.js';
 import { profileCache, profileKey, batchAnalyticsCache, batchKey } from './cache.js';
+import { HttpError } from '../utils/httpError.js';
+import { activeScoringConfig } from './scoringContext.js';
 
 const BATCH_SIZE = 50;
 
@@ -53,7 +55,7 @@ async function fetchBulkStudentData(studentIds) {
 
   const [allSessions, allCommReports, allResumes, allJourneys] = await Promise.all([
     InterviewSession.findAll({
-      where: { student_id: { [Op.in]: studentIds }, status: 'completed' },
+      where: { student_id: { [Op.in]: studentIds }, status: { [Op.in]: ['completed', 'ended'] } },
       order: [['created_at', 'ASC']],
     }),
     CommunicationReport.findAll({
@@ -141,7 +143,7 @@ function assembleStudentData(studentId, bulkData) {
 /**
  * Compute a student profile with caching.
  */
-function computeProfileWithCache(studentId, studentData, weights = DEFAULT_COMPETENCY_WEIGHTS) {
+function computeProfileWithCache(studentId, studentData, weights = activeScoringConfig().competency_weights || DEFAULT_COMPETENCY_WEIGHTS) {
   const key = profileKey(studentId);
   const cached = profileCache.get(key);
   if (cached) return cached;
@@ -154,7 +156,7 @@ function computeProfileWithCache(studentId, studentData, weights = DEFAULT_COMPE
   }
 
   const overallResult = computeOverallReadiness(competencies, weights);
-  const readinessBand = classifyReadiness(overallResult.overall);
+  const readinessBand = overallResult.totalWeight > 0 ? classifyReadiness(overallResult.overall) : 'UNASSESSED';
   const assessmentConfidence = computeAssessmentConfidence(competencies);
   const gaps = identifySkillGaps(competencies);
   const strengths = identifyStrengths(competencies);
@@ -185,7 +187,7 @@ function computeProfileWithCache(studentId, studentData, weights = DEFAULT_COMPE
  * Load and compute profiles for multiple students in parallel.
  * Returns array of { studentId, name, email, ...profile }.
  */
-async function loadBatchProfiles(students, { weights = DEFAULT_COMPETENCY_WEIGHTS, parallel = true } = {}) {
+async function loadBatchProfiles(students, { weights = activeScoringConfig().competency_weights || DEFAULT_COMPETENCY_WEIGHTS, parallel = true } = {}) {
   const studentIds = students.map(s => s._id);
 
   // Step 1: Bulk fetch all raw data (4 queries total instead of 4N)
@@ -244,7 +246,10 @@ async function loadBatchProfiles(students, { weights = DEFAULT_COMPETENCY_WEIGHT
  * Get student profiles for an institution, with caching.
  */
 async function getInstitutionProfiles(institutionId, userRole, queryFilters = {}) {
-  const cacheKey = batchKey(institutionId || 'all', queryFilters);
+  if (!['admin', 'master_admin'].includes(userRole) || (userRole === 'admin' && !institutionId)) {
+    throw new HttpError(403, 'Institution access required');
+  }
+  const cacheKey = batchKey(userRole === 'master_admin' ? 'all' : institutionId, queryFilters);
   const cached = batchAnalyticsCache.get(cacheKey);
   if (cached) return cached;
 

@@ -40,8 +40,23 @@ import {
 import { profileCache, profileKey, batchAnalyticsCache, batchKey } from './cache.js';
 import { COMPETENCY_RUBRICS, getAllRubrics } from './rubricConfig.js';
 import { validateSessionEvaluations, detectAnomalies } from './aiValidation.js';
+import { scoringContext, activeScoringConfig } from './scoringContext.js';
+import { validateScoringConfig } from './configValidation.js';
 
 const router = Router();
+router.use(requireAuth, (req, _res, next) => {
+  if (req.user.role === 'admin' && !req.user.institutionId) {
+    return next(new HttpError(403, 'Institution access required'));
+  }
+  if (req.path.startsWith('/config') && !['GET', 'HEAD'].includes(req.method) && req.user.role !== 'master_admin') {
+    return next(new HttpError(403, 'Only master admins can change platform scoring configuration'));
+  }
+  next();
+});
+router.use(asyncHandler(async (_req, _res, next) => {
+  const config = await PlacementConfig.findOne({ where: { active: true } });
+  scoringContext.run(config?.get({ plain: true }) || {}, next);
+}));
 
 // ═══════════════════════════════════════════════════════
 // HELPER: Gather all data for a single student (unchanged)
@@ -49,7 +64,7 @@ const router = Router();
 async function gatherStudentData(studentId) {
   const [interviewSessions, latestCommReport, latestResume, journey] = await Promise.all([
     InterviewSession.findAll({
-      where: { student_id: studentId, status: 'completed' },
+      where: { student_id: studentId, status: { [Op.in]: ['completed', 'ended'] } },
       order: [['created_at', 'ASC']],
     }),
     CommunicationReport.findOne({
@@ -97,7 +112,7 @@ async function gatherStudentData(studentId) {
 // ═══════════════════════════════════════════════════════
 // HELPER: Compute full placement profile (single student)
 // ═══════════════════════════════════════════════════════
-function computeStudentProfile(studentData, weights = DEFAULT_COMPETENCY_WEIGHTS) {
+function computeStudentProfile(studentData, weights = activeScoringConfig().competency_weights || DEFAULT_COMPETENCY_WEIGHTS) {
   const { interviewHistory, communicationReport, resumeAnalysis, completedInterviews } = studentData;
 
   const competencies = {};
@@ -106,7 +121,7 @@ function computeStudentProfile(studentData, weights = DEFAULT_COMPETENCY_WEIGHTS
   }
 
   const overallResult = computeOverallReadiness(competencies, weights);
-  const readinessBand = classifyReadiness(overallResult.overall);
+  const readinessBand = overallResult.totalWeight > 0 ? classifyReadiness(overallResult.overall) : 'UNASSESSED';
   const assessmentConfidence = computeAssessmentConfidence(competencies);
   const gaps = identifySkillGaps(competencies);
   const strengths = identifyStrengths(competencies);
@@ -151,7 +166,7 @@ router.get('/student/profile', requireAuth, asyncHandler(async (req, res) => {
   res.json({
     studentId,
     ...profile,
-    scoringEngineVersion: '1.0',
+    scoringEngineVersion: activeScoringConfig().version || '1.0',
   });
 }));
 
@@ -528,7 +543,7 @@ router.post('/admin/recalculate/:studentId', requireAuth, requireRole('admin', '
   res.json({
     studentId,
     ...profile,
-    scoringEngineVersion: '1.0',
+    scoringEngineVersion: activeScoringConfig().version || '1.0',
     recalculatedAt: new Date().toISOString(),
   });
 }));
@@ -621,6 +636,7 @@ router.get('/config', requireAuth, requireRole('admin', 'master_admin'), asyncHa
 
 // POST /api/placement/config — create new config version
 router.post('/config', requireAuth, requireRole('admin', 'master_admin'), asyncHandler(async (req, res) => {
+  validateScoringConfig(req.body);
   const { version, weights, readinessBands, talentCriteria, segmentationThresholds, confidenceThresholds, notes } = req.body;
 
   if (!version) throw new HttpError(400, 'Version is required');
@@ -646,11 +662,18 @@ router.post('/config', requireAuth, requireRole('admin', 'master_admin'), asyncH
 
 // PUT /api/placement/config/:configId — update config
 router.put('/config/:configId', requireAuth, requireRole('admin', 'master_admin'), asyncHandler(async (req, res) => {
+  validateScoringConfig(req.body);
   const { configId } = req.params;
   const config = await PlacementConfig.findByPk(configId);
   if (!config) throw new HttpError(404, 'Config not found');
 
   const { weights, readinessBands, talentCriteria, segmentationThresholds, confidenceThresholds, notes } = req.body;
+  await getSequelize().transaction(async transaction => {
+  await getSequelize().query('LOCK TABLE placement_configs IN EXCLUSIVE MODE', { transaction });
+  await config.reload({ transaction });
+  if (config.active || await ScoringVersion.findOne({ where: { version: config.version }, transaction })) {
+    throw new HttpError(409, 'Activated versions are immutable. Create a new version instead.');
+  }
 
   await config.update({
     competency_weights: weights || config.competency_weights,
@@ -658,7 +681,8 @@ router.put('/config/:configId', requireAuth, requireRole('admin', 'master_admin'
     talent_criteria: talentCriteria || config.talent_criteria,
     segmentation_thresholds: segmentationThresholds || config.segmentation_thresholds,
     confidence_thresholds: confidenceThresholds || config.confidence_thresholds,
-    notes: notes || config.notes,
+    notes: notes ?? config.notes,
+  }, { transaction });
   });
 
   res.json({ config });
@@ -670,14 +694,19 @@ router.post('/config/:configId/activate', requireAuth, requireRole('admin', 'mas
   const config = await PlacementConfig.findByPk(configId);
   if (!config) throw new HttpError(404, 'Config not found');
 
-  // Deactivate all other configs
-  await PlacementConfig.update({ active: false }, { where: { active: true } });
+  validateScoringConfig({ weights: config.competency_weights, readinessBands: config.readiness_bands, talentCriteria: config.talent_criteria, segmentationThresholds: config.segmentation_thresholds, confidenceThresholds: config.confidence_thresholds });
+  await getSequelize().transaction(async transaction => {
+  // Serialize activations across all backend instances.
+  await getSequelize().query('LOCK TABLE placement_configs IN EXCLUSIVE MODE', { transaction });
+  await config.reload({ transaction });
+  validateScoringConfig({ weights: config.competency_weights, readinessBands: config.readiness_bands, talentCriteria: config.talent_criteria, segmentationThresholds: config.segmentation_thresholds, confidenceThresholds: config.confidence_thresholds });
+  await PlacementConfig.update({ active: false }, { where: { active: true }, transaction });
 
   // Activate this one
-  await config.update({ active: true });
+  await config.update({ active: true }, { transaction });
 
   // Also create a scoring version entry
-  const existingVersion = await ScoringVersion.findOne({ where: { version: config.version } });
+  const existingVersion = await ScoringVersion.findOne({ where: { version: config.version }, transaction });
   if (!existingVersion) {
     await ScoringVersion.create({
       version: config.version,
@@ -690,8 +719,9 @@ router.post('/config/:configId/activate', requireAuth, requireRole('admin', 'mas
       rubric_config: COMPETENCY_RUBRICS,
       activated_by: req.user?._id || req.user?.user_id,
       notes: config.notes,
-    });
+    }, { transaction });
   }
+  });
 
   profileCache.invalidateAll();
   batchAnalyticsCache.invalidateAll();
@@ -776,6 +806,16 @@ router.post('/admin/human-validation', requireAuth, requireRole('admin', 'master
     throw new HttpError(400, `Invalid competency: ${competency}. Must be one of: ${COMPETENCIES.join(', ')}`);
   }
 
+  const student = await User.findByPk(studentId);
+  if (!student || !['student', 'individual_student'].includes(student.role)) throw new HttpError(404, 'Student not found');
+  if (req.user.role === 'admin' && student.institutionId !== req.user.institutionId) throw new HttpError(403, 'Access denied');
+  if (![aiScore, humanScore].every(score => typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= 100)) {
+    throw new HttpError(400, 'Scores must be numbers between 0 and 100');
+  }
+  if (sessionId && !await InterviewSession.findOne({ where: { session_id: sessionId, student_id: studentId } })) {
+    throw new HttpError(400, 'Session does not belong to this student');
+  }
+
   const difference = Math.round((humanScore - aiScore) * 100) / 100;
 
   const validation = await HumanValidation.create({
@@ -789,7 +829,7 @@ router.post('/admin/human-validation', requireAuth, requireRole('admin', 'master
     evaluator_name: evaluatorName,
     rubric_version: '1.0',
     scoring_engine_version: '1.0',
-    institution_id: req.user?.institutionId,
+    institution_id: student.institutionId,
     notes,
   });
 

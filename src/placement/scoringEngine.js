@@ -10,6 +10,7 @@
  * Scoring Engine Version: 1.0
  */
 
+import { activeScoringConfig } from './scoringContext.js';
 const COMPETENCIES = [
   'technical_knowledge',
   'problem_solving',
@@ -246,6 +247,15 @@ function computeCompetency(competency, interviewHistory, communicationReport, re
  */
 function computeConfidence(dataPoints, interviewHistory) {
   if (dataPoints === 0) return 'INSUFFICIENT';
+  const configured = activeScoringConfig().confidence_thresholds;
+  if (configured && Object.keys(configured).length) {
+    const interviews = new Set(interviewHistory.map(h => h.session_id).filter(Boolean)).size;
+    for (const level of ['HIGH', 'MEDIUM', 'LOW']) {
+      const threshold = configured[level];
+      if (threshold && dataPoints >= threshold.minQuestions && interviews >= threshold.minInterviews) return level;
+    }
+    return 'LOW';
+  }
 
   const now = Date.now();
   const dates = interviewHistory
@@ -288,7 +298,8 @@ function computeOverallReadiness(competencies, weights = DEFAULT_COMPETENCY_WEIG
 
   // Update normalized weights in breakdown
   for (const b of breakdown) {
-    b.normalizedWeight = totalWeight > 0 ? round2(b.weight / totalWeight) : 0;
+    const assessed = competencies[b.competency]?.dataPoints > 0 && competencies[b.competency]?.confidence !== 'INSUFFICIENT';
+    b.normalizedWeight = totalWeight > 0 && assessed ? round2(b.weight / totalWeight) : 0;
   }
 
   return { overall, totalWeight, breakdown };
@@ -297,7 +308,7 @@ function computeOverallReadiness(competencies, weights = DEFAULT_COMPETENCY_WEIG
 /**
  * Classify readiness into a band based on configurable thresholds.
  */
-function classifyReadiness(score, bands = DEFAULT_READINESS_BANDS) {
+function classifyReadiness(score, bands = activeScoringConfig().readiness_bands || DEFAULT_READINESS_BANDS) {
   if (score >= bands.PLACEMENT_READY.min) return 'PLACEMENT_READY';
   if (score >= bands.INTERVIEW_READY.min) return 'INTERVIEW_READY';
   if (score >= bands.DEVELOPMENT_REQUIRED.min) return 'DEVELOPMENT_REQUIRED';
@@ -366,6 +377,7 @@ function identifyStrengths(competencies) {
  * Classify a student into segments based on competency scores.
  */
 function classifyStudentSegment(competencies) {
+  const thresholds = activeScoringConfig().segmentation_thresholds || DEFAULT_SEGMENTATION_THRESHOLDS;
   const segments = [];
   const scores = {};
   for (const comp of COMPETENCIES) {
@@ -377,11 +389,11 @@ function classifyStudentSegment(competencies) {
 
   if (Object.keys(scores).length === 0) return ['UNASSESSED'];
 
-  const strong = Object.entries(scores).filter(([_, s]) => s >= DEFAULT_SEGMENTATION_THRESHOLDS.STRONG);
+  const strong = Object.entries(scores).filter(([_, s]) => s >= thresholds.STRONG);
   const moderate = Object.entries(scores).filter(([_, s]) =>
-    s >= DEFAULT_SEGMENTATION_THRESHOLDS.MODERATE && s < DEFAULT_SEGMENTATION_THRESHOLDS.STRONG
+    s >= thresholds.MODERATE && s < thresholds.STRONG
   );
-  const weak = Object.entries(scores).filter(([_, s]) => s < DEFAULT_SEGMENTATION_THRESHOLDS.MODERATE);
+  const weak = Object.entries(scores).filter(([_, s]) => s < thresholds.MODERATE);
 
   if (strong.length >= 5 && weak.length === 0) segments.push('STRONG_OVERALL');
   if (weak.length >= 3) segments.push('MULTIPLE_SKILL_GAPS');
@@ -392,19 +404,19 @@ function classifyStudentSegment(competencies) {
   const projScore = scores.project_knowledge;
   const bhScore = scores.behavioral_skills;
 
-  if (techScore != null && techScore >= 75 && commScore != null && commScore < 60) {
+  if (techScore != null && techScore >= thresholds.STRONG && commScore != null && commScore < thresholds.MODERATE) {
     segments.push('TECHNICAL_STRONG_COMMUNICATION_WEAK');
   }
-  if (commScore != null && commScore >= 75 && techScore != null && techScore < 60) {
+  if (commScore != null && commScore >= thresholds.STRONG && techScore != null && techScore < thresholds.MODERATE) {
     segments.push('COMMUNICATION_STRONG_TECHNICAL_WEAK');
   }
-  if (techScore != null && techScore >= 75 && psScore != null && psScore < 60) {
+  if (techScore != null && techScore >= thresholds.STRONG && psScore != null && psScore < thresholds.MODERATE) {
     segments.push('TECHNICAL_STRONG_PROBLEM_SOLVING_WEAK');
   }
-  if (projScore != null && projScore >= 75 && techScore != null && techScore < 60) {
+  if (projScore != null && projScore >= thresholds.STRONG && techScore != null && techScore < thresholds.MODERATE) {
     segments.push('PROJECT_STRONG_TECHNICAL_WEAK');
   }
-  if (strong.length >= 4 && bhScore != null && bhScore < 60) {
+  if (strong.length >= 4 && bhScore != null && bhScore < thresholds.MODERATE) {
     segments.push('STRONG_OVERALL_BEHAVIORAL_WEAK');
   }
 
@@ -414,7 +426,7 @@ function classifyStudentSegment(competencies) {
 /**
  * Check if student meets interview-ready/talent criteria.
  */
-function meetsTalentCriteria(competencies, overallReadiness, criteria = DEFAULT_TALENT_CRITERIA) {
+function meetsTalentCriteria(competencies, overallReadiness, criteria = activeScoringConfig().talent_criteria || DEFAULT_TALENT_CRITERIA) {
   if (overallReadiness < criteria.overall_readiness) return false;
   for (const [comp, threshold] of Object.entries(criteria)) {
     if (comp === 'overall_readiness') continue;
@@ -515,7 +527,7 @@ function computeBatchAnalytics(profiles) {
   }
 
   const assessed = profiles.filter(p => (p.readinessBand || p.readiness_band) !== 'UNASSESSED');
-  const readinessScores = assessed.map(p => p.overallReadiness || p.overall_placement_score).filter(s => s > 0);
+  const readinessScores = assessed.map(p => p.overallReadiness ?? p.overall_placement_score).filter(Number.isFinite);
   const avgReadiness = round2(avg(readinessScores));
 
   const distribution = { PLACEMENT_READY: 0, INTERVIEW_READY: 0, DEVELOPMENT_REQUIRED: 0, HIGH_INTERVENTION: 0 };
@@ -631,7 +643,7 @@ function generateScoringExplanation(competencies, overallResult, readinessBand, 
     weightBreakdown: overallResult.breakdown,
     readinessBand,
     assessmentConfidence,
-    scoringEngineVersion: '1.0',
+    scoringEngineVersion: activeScoringConfig().version || '1.0',
     calculatedAt: new Date().toISOString(),
   };
 }

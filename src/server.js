@@ -32,6 +32,8 @@ import helpRoutes from "./help/routes.js";
 import referralRoutes from "./referral/routes.js";
 import referralAdminRoutes from "./referral/adminRoutes.js";
 import placementRoutes from "./placement/routes.js";
+import { commitInterviewAnswer } from './services/interviewState.js';
+import { buildStudentFilter } from './aptitude/utils/adminScope.js';
 import { getCodeRunnerHealth } from "./programming/services/executionService.js";
 import { aiService } from "./services/aiService.js";
 import { extractTextFromPdf } from "./services/resumeParser.js";
@@ -125,14 +127,22 @@ async function getSession(sessionId) {
   return session;
 }
 
-function canAccessStudentRecord(user, studentId) {
+async function canAccessStudentRecord(user, studentId) {
   if (!user || !studentId) return false;
-  if (["admin", "master_admin"].includes(user.role)) return true;
+  if (user.role === 'master_admin') return true;
+  if (user.role === 'admin') {
+    const student = await buildUserContext(studentId);
+    if (!student) return false;
+    if (!user.institutionId) return student.assigned_admin === user._id;
+    if (student.institutionId !== user.institutionId) return false;
+    if (user.admin_role === 'hod') return Boolean(user.department_id) && student.department_id === user.department_id;
+    return true;
+  }
   return studentId === user._id;
 }
 
-function assertCanAccessSession(user, session) {
-  if (!canAccessStudentRecord(user, session.student_id)) {
+async function assertCanAccessSession(user, session) {
+  if (!await canAccessStudentRecord(user, session.student_id)) {
     throw new HttpError(403, "You do not have permission to access this interview session");
   }
 }
@@ -171,9 +181,12 @@ async function updateSessionAtomic(sessionId, update) {
   }
 }
 
-async function handleAnswer({ sessionId, answer, user, videoMetrics = null }) {
+async function handleAnswer({ sessionId, answer, user, videoMetrics = null, questionNumber }) {
   const session = await getSession(sessionId);
-  assertCanAccessSession(user, session);
+  await assertCanAccessSession(user, session);
+  if (questionNumber != null && Number(questionNumber) !== session.question_count) {
+    throw new HttpError(409, 'This question was already submitted. Reload the session to continue.');
+  }
 
   if (session.status !== "active") {
     throw new HttpError(400, "Interview completed");
@@ -205,12 +218,8 @@ async function handleAnswer({ sessionId, answer, user, videoMetrics = null }) {
   const updatedHistory = [...(session.history || []), historyEntry];
   const isLast = session.question_count >= config.maxQuestions;
 
-  await updateSessionAtomic(sessionId, {
-    history: updatedHistory,
-    ...(isLast ? { status: "completed" } : {}),
-  });
-
   if (isLast) {
+    await commitInterviewAnswer(session, { history: updatedHistory, status: 'completed' });
     return {
       completed: true,
       message: "Interview completed. Call /api/end",
@@ -239,7 +248,8 @@ async function handleAnswer({ sessionId, answer, user, videoMetrics = null }) {
       : "Tell me more about an experience that helped you build the relevant skills for this role.";
   }
 
-  await updateSessionAtomic(sessionId, {
+  await commitInterviewAnswer(session, {
+    history: updatedHistory,
     current_question: nextQuestion,
     question_count: session.question_count + 1
   });
@@ -511,7 +521,7 @@ app.post("/api/answer_text", requireAuth, requireModuleAccess('ai_interview'), a
     throw new HttpError(400, "session_id and answer are required");
   }
 
-  res.json(await handleAnswer({ sessionId, answer, user: req.user }));
+  res.json(await handleAnswer({ sessionId, answer, user: req.user, questionNumber: req.body.question_number }));
 }));
 
 
@@ -537,7 +547,7 @@ app.post("/api/answer_video", requireAuth, requireModuleAccess('ai_interview'), 
     const serverMetrics = await hasVideoStream(renamedPath) ? await analyzeVideo(renamedPath) : lowQualityMetrics();
     const clientMetrics = sanitizeClientVideoMetrics(req.body?.video_metrics);
     const videoMetrics = clientMetrics?.quality_flag === "good" ? clientMetrics : serverMetrics;
-    const response = await handleAnswer({ sessionId, answer: transcript, user: req.user, videoMetrics });
+    const response = await handleAnswer({ sessionId, answer: transcript, user: req.user, videoMetrics, questionNumber: req.body.question_number });
     res.json({ ...response, transcript });
   } finally {
     await cleanupFiles([renamedPath]);
@@ -574,7 +584,7 @@ app.post("/api/answer_video_with_audio", requireAuth, requireModuleAccess('ai_in
     const serverMetrics = await hasVideoStream(videoPath) ? await analyzeVideo(videoPath) : lowQualityMetrics();
     const clientMetrics = sanitizeClientVideoMetrics(req.body?.video_metrics);
     const videoMetrics = clientMetrics?.quality_flag === "good" ? clientMetrics : serverMetrics;
-    const response = await handleAnswer({ sessionId, answer: transcript, user: req.user, videoMetrics });
+    const response = await handleAnswer({ sessionId, answer: transcript, user: req.user, videoMetrics, questionNumber: req.body.question_number });
     res.json({ ...response, transcript });
   } finally {
     await cleanupFiles([videoPath, renamedAudioPath]);
@@ -583,7 +593,7 @@ app.post("/api/answer_video_with_audio", requireAuth, requireModuleAccess('ai_in
 
 app.get("/api/session/:session_id", requireAuth, requireModuleAccess('ai_interview'), asyncHandler(async (req, res) => {
   const session = await getSession(req.params.session_id);
-  assertCanAccessSession(req.user, session);
+  await assertCanAccessSession(req.user, session);
   res.json({
     session_id: session.session_id,
     question: session.current_question || "",
@@ -611,11 +621,14 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
   }
 
   const session = await getSession(sessionId);
-  assertCanAccessSession(req.user, session);
+  await assertCanAccessSession(req.user, session);
 
   const existing = await InterviewReport.findOne({ where: { session_id: sessionId } });
   if (existing) {
     await updateSessionAtomic(sessionId, { status: "ended" });
+    if (await JourneyInterview.findOne({ where: { session_id: sessionId, student_id: session.student_id } })) {
+      await journeyService.completeInterview(session.student_id, sessionId, existing.overall?.percentage || 0, existing.overall?.grade || '');
+    }
     res.json(existing);
     return;
   }
@@ -860,13 +873,20 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
     console.log('Post-interview journey sync failed:', _syncErr.message);
   }
 
+  // Use the same transactional progress calculation as the mentorship flow.
+  // A failed reconciliation is retryable through the existing-report branch.
+  if (await JourneyInterview.findOne({ where: { session_id: sessionId, student_id: session.student_id } })) {
+    await journeyService.completeInterview(session.student_id, sessionId, percentage, grade);
+  }
   res.json(report);
 }));
 
 app.get("/api/reports", requireAuth, requireModuleAccess('ai_interview'), asyncHandler(async (req, res) => {
-  const query = ["admin", "master_admin"].includes(req.user.role)
+  const query = req.user.role === 'master_admin'
     ? {}
-    : { student_id: req.user._id };
+    : req.user.role === 'admin'
+      ? (await buildStudentFilter(req.user)).filter
+      : { student_id: req.user._id };
 
   const items = await InterviewReport.findAll({
     where: query,
@@ -906,7 +926,7 @@ app.get("/api/report/:session_id", requireAuth, requireModuleAccess('ai_intervie
   if (!report) {
     throw new HttpError(404, "Report not found");
   }
-  if (!canAccessStudentRecord(req.user, report.student_id)) {
+  if (!await canAccessStudentRecord(req.user, report.student_id)) {
     throw new HttpError(403, "You do not have permission to access this report");
   }
 
@@ -922,7 +942,7 @@ app.get("/api/report/:session_id/pdf", requireAuth, requireModuleAccess('ai_inte
   if (!report) {
     throw new HttpError(404, "Report not found");
   }
-  if (!canAccessStudentRecord(req.user, report.student_id)) {
+  if (!await canAccessStudentRecord(req.user, report.student_id)) {
     throw new HttpError(403, "You do not have permission to access this report");
   }
 
@@ -941,7 +961,7 @@ app.get("/api/report/:session_id/ats", requireAuth, requireModuleAccess('ai_inte
   if (!report) {
     throw new HttpError(404, "Report not found");
   }
-  if (!canAccessStudentRecord(req.user, report.student_id)) {
+  if (!await canAccessStudentRecord(req.user, report.student_id)) {
     throw new HttpError(403, "You do not have permission to access this report");
   }
 

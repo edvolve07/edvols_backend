@@ -10,6 +10,7 @@
  *   - Auto-stale-while-revalidate for dashboard reads
  */
 
+import { scoringCacheSuffix } from './scoringContext.js';
 const DEFAULT_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_MAX_ENTRIES = 2000;
 
@@ -93,12 +94,12 @@ const profileCache = new PlacementCache();
 const batchAnalyticsCache = new PlacementCache({ ttlMs: 2 * 60 * 1000, maxEntries: 500 });
 
 function profileKey(studentId) {
-  return `profile:${studentId}`;
+  return `profile:${studentId}${scoringCacheSuffix()}`;
 }
 
 function batchKey(institutionId, filters = {}) {
   const filterStr = JSON.stringify(filters);
-  return `batch:${institutionId}:${filterStr}`;
+  return `batch:${institutionId}:${filterStr}${scoringCacheSuffix()}`;
 }
 
 export {
