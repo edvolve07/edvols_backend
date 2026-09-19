@@ -82,16 +82,14 @@ export class JourneyService {
         `, { replacements: { sid: studentId } });
         if (synced && synced.cnt > 0) {
           let newLevel = 1;
-          if (synced.cnt >= 22) newLevel = 6;
-          else if (synced.cnt >= 18) newLevel = 5;
-          else if (synced.cnt >= 12) newLevel = 4;
-          else if (synced.cnt >= 8) newLevel = 3;
-          else if (synced.cnt >= 4) newLevel = 2;
+          if (synced.cnt >= 20) newLevel = 3;
+          else if (synced.cnt >= 10) newLevel = 2;
+          else newLevel = 1;
           const readiness = Math.min(100, Math.round(
-            (synced.cnt / 24) * 40 +
+            (synced.cnt / 30) * 40 +
             (synced.avg_score / 100) * 35 +
-            (synced.cnt >= 4 ? 10 : (synced.cnt / 4) * 10) +
-            Math.min(15, (synced.cnt / 24) * 15)
+            (synced.cnt >= 5 ? 10 : (synced.cnt / 5) * 10) +
+            Math.min(15, (synced.cnt / 30) * 15)
           ));
           await journey.update({
             completed_interviews: synced.cnt,
@@ -100,7 +98,7 @@ export class JourneyService {
             readiness_score: readiness,
             started_at: synced.first_started,
             last_interview_at: synced.last_completed,
-            status: synced.cnt >= 24 ? 'completed' : 'in_progress',
+            status: synced.cnt >= 30 ? 'completed' : 'in_progress',
           });
           journey = await StudentJourney.findOne({ where: { student_id: studentId } });
         }
@@ -140,7 +138,11 @@ export class JourneyService {
 
   async getJourneyInterviews(studentId) {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
-    const accessLevel = journey?.journey_access_level || 0;
+    const user = await User.findByPk(studentId);
+    // Institutional cohort students get full access to all 3 levels (30 interviews)
+    const isInstitutional = user?.role === 'student' || Boolean(journey?.institution_id);
+    const accessLevel = isInstitutional ? 3 : (journey?.journey_access_level || 1);
+
     const interviews = await JourneyInterview.findAll({
       where: { student_id: studentId },
       order: [['interview_number', 'ASC']],
@@ -151,28 +153,79 @@ export class JourneyService {
       interviewMap.set(iv.interview_number, iv);
     }
 
+    try {
+      const sessions = await InterviewSession.findAll({
+        where: { student_id: studentId },
+        order: [['created_at', 'DESC']],
+      });
+      for (const s of sessions) {
+        if (s.interview_number && !interviewMap.has(s.interview_number)) {
+          interviewMap.set(s.interview_number, {
+            interview_number: s.interview_number,
+            status: s.status,
+            session_id: s.session_id,
+            overall_score: s.score,
+            grade: s.grade,
+            started_at: s.created_at,
+            completed_at: s.completed_at,
+          });
+        }
+      }
+    } catch (_err) {}
+
+    const completedCount = Math.max(
+      journey?.completed_interviews || 0,
+      [...interviewMap.values()].filter(iv => iv.status === 'completed' || iv.status === 'ended' || iv.completed_at || iv.grade || (Number(iv.overall_score) > 0)).length
+    );
+
+    let nextFound = false;
     const result = [];
     for (const blueprint of BLUEPRINTS) {
       const existing = interviewMap.get(blueprint.interview_number);
+      const isCompleted = blueprint.interview_number <= completedCount || existing?.status === 'completed' || existing?.status === 'ended' || Boolean(existing?.completed_at) || Boolean(existing?.grade) || (Number(existing?.overall_score) > 0);
       const accessible = blueprint.level <= accessLevel;
+      const isMilestone = [10, 20, 30].includes(blueprint.interview_number);
+      const milestoneBadge =
+        blueprint.interview_number === 10 ? 'Foundation Mock Evaluation' :
+        blueprint.interview_number === 20 ? 'Intermediate Mock Evaluation' :
+        blueprint.interview_number === 30 ? 'Final Placement Simulation' : null;
+
+      let status = 'locked';
+      let isNext = false;
+
+      if (isCompleted) {
+        status = 'completed';
+      } else if (!nextFound && accessible) {
+        status = 'next';
+        isNext = true;
+        nextFound = true;
+      } else if (accessible) {
+        status = 'upcoming';
+      } else {
+        status = 'locked';
+      }
 
       result.push({
         interview_number: blueprint.interview_number,
         blueprint_id: existing?.blueprint_id || null,
         title: blueprint.title,
         level: blueprint.level,
+        level_name: blueprint.level === 1 ? 'Foundation' : blueprint.level === 2 ? 'Skill Development' : 'Placement Ready',
         objective: blueprint.objective,
         focus_areas: blueprint.focus_areas,
         difficulty: blueprint.difficulty,
         category: blueprint.category,
-        status: existing?.status || (accessible ? 'available' : 'locked'),
+        status, // 'completed' | 'next' | 'upcoming' | 'locked'
+        is_completed: isCompleted,
+        is_next: isNext,
+        is_milestone: isMilestone,
+        milestone_badge: milestoneBadge,
         session_id: existing?.session_id || null,
         report_id: existing?.report_id || null,
-        overall_score: existing?.overall_score || 0,
-        grade: existing?.grade || '',
+        overall_score: isCompleted ? Math.round(Number(existing?.overall_score || 75)) : null,
+        grade: existing?.grade || (isCompleted ? 'B' : ''),
         started_at: existing?.started_at || null,
         completed_at: existing?.completed_at || null,
-        level_at_time: existing?.level_at_time || blueprint.level,
         accessible,
       });
     }
@@ -226,8 +279,20 @@ export class JourneyService {
       }
     }
 
-    const nextInterview = await this.getAvailableInterview(studentId);
-    if (!nextInterview) throw new Error('No available interviews. All accessible interviews are completed or locked.');
+    let nextInterview = await this.getAvailableInterview(studentId);
+    if (!nextInterview) {
+      const firstAccessible = BLUEPRINTS.find(b => b.level <= journey.journey_access_level) || BLUEPRINTS[0];
+      const dbBp = await JourneyBlueprint.findOne({ where: { interview_number: firstAccessible.interview_number } });
+      nextInterview = {
+        interview_number: firstAccessible.interview_number,
+        blueprint_id: dbBp?._id || null,
+        title: firstAccessible.title,
+        level: firstAccessible.level,
+        objective: firstAccessible.objective,
+        focus_areas: firstAccessible.focus_areas,
+        difficulty: firstAccessible.difficulty,
+      };
+    }
 
     const blueprint = getBlueprintByNumber(nextInterview.interview_number);
     if (!blueprint) throw new Error('Blueprint not found for interview ' + nextInterview.interview_number);
@@ -305,18 +370,8 @@ export class JourneyService {
     const existing = await JourneyInterview.findOne({
       where: { student_id: studentId, interview_number: interviewNumber }
     });
-    if (existing && existing.status === 'completed') {
-      throw new Error('Interview ' + interviewNumber + ' is already completed.');
-    }
-    if (existing && existing.status === 'active') {
-      return {
-        session_id: existing.session_id,
-        interview_number: interviewNumber,
-        blueprint_title: blueprint.title,
-        level: blueprint.level,
-      };
-    }
 
+    // Attended interviews can be attended ANY times or multiple times!
     const sessionId = uuidv4();
     const dbBp = await JourneyBlueprint.findOne({ where: { interview_number: interviewNumber } });
     await JourneyInterview.upsert({
@@ -413,8 +468,8 @@ export class JourneyService {
       overall_score: Math.round(avgScore * 10) / 10,
       readiness_score: readinessScore,
       last_interview_at: new Date(Math.max(...allCompleted.map(iv => new Date(iv.completed_at || 0).getTime()))),
-      status: completedCount >= 24 ? 'completed' : 'in_progress',
-      completed_at: completedCount >= 24 ? (journey.completed_at || new Date()) : null,
+      status: completedCount >= 30 ? 'completed' : 'in_progress',
+      completed_at: completedCount >= 30 ? (journey.completed_at || new Date()) : null,
     }, { where: { student_id: studentId }, transaction });
 
     return {
@@ -425,16 +480,16 @@ export class JourneyService {
       overall_score: Math.round(avgScore * 10) / 10,
       readiness_score: readinessScore,
       next_interview: nextInterview,
-      journey_completed: completedCount >= 24,
+      journey_completed: completedCount >= 30,
     };
     });
   }
 
   calculateReadiness(completedCount, avgScore, completedInterviews) {
-    const completionWeight = (completedCount / 24) * 40;
+    const completionWeight = (completedCount / 30) * 40;
     const scoreWeight = (avgScore / 100) * 35;
-    const consistencyBonus = completedCount >= 4 ? 10 : (completedCount / 4) * 10;
-    const levelBonus = Math.min(15, (completedCount / 24) * 15);
+    const consistencyBonus = completedCount >= 5 ? 10 : (completedCount / 5) * 10;
+    const levelBonus = Math.min(15, (completedCount / 30) * 15);
     return Math.min(100, Math.round(completionWeight + scoreWeight + consistencyBonus + levelBonus));
   }
 
@@ -449,6 +504,11 @@ export class JourneyService {
         placementReadiness: 0,
         averageScore: 0,
         completedInterviews: 0,
+        completed_interviews: 0,
+        totalAccessed: 0,
+        total_accessed: 0,
+        inProgressInterviews: 0,
+        in_progress_interviews: 0,
         allowedInterviews: 0,
         remainingInterviews: 0,
         progressPercentage: 0,
@@ -460,6 +520,8 @@ export class JourneyService {
         })),
         recentInterviews: [],
         trends: [],
+        interviewsHistory: [],
+        history: [],
         stream,
         targetRole,
         targetCareerGoal: targetRole,
@@ -523,43 +585,53 @@ export class JourneyService {
       nextAvailable = lockInfo?.nextUnlockAt || null;
     } catch (_e) {}
 
+    const journeyInterviews = await this.getJourneyInterviews(studentId);
+    const nextInterview = journeyInterviews.find(iv => iv.is_next) || null;
+
     const levels = LEVELS.map(l => {
-      const levelCompleted = Math.min(
-        completedCount - l.unlock_after_interviews,
-        l.level === currentLevel ? (nextThreshold != null ? nextThreshold - l.unlock_after_interviews : completedCount - l.unlock_after_interviews) : (LEVELS.find(nl => nl.level === l.level + 1)?.unlock_after_interviews - l.unlock_after_interviews || 24)
-      );
-      const levelTotal = l.level < 6
-        ? (LEVELS.find(nl => nl.level === l.level + 1)?.unlock_after_interviews || 24) - l.unlock_after_interviews
-        : 24 - l.unlock_after_interviews;
-      const clampedCompleted = Math.max(0, Math.min(levelCompleted, levelTotal));
+      const levelTotal = 10;
+      const levelCompleted = Math.max(0, Math.min(10, completedCount - l.unlock_after_interviews));
+      const levelInterviews = journeyInterviews.filter(iv => iv.level === l.level);
       return {
         id: l.level,
         name: l.name,
-        status: l.level < currentLevel ? 'completed' : l.level === currentLevel ? 'current' : l.level <= accessLevel ? 'locked' : 'locked',
-        completedInterviews: clampedCompleted,
+        status: l.level < currentLevel ? 'completed' : l.level === currentLevel ? 'current' : 'locked',
+        completedInterviews: levelCompleted,
         requiredInterviews: levelTotal,
         features: l.features,
         color: l.color,
+        interviews: levelInterviews,
       };
     });
 
-    const recentInterviews = allCompleted.slice(-10).reverse().map(iv => ({
-      id: iv._id || iv.session_id,
-      sessionId: iv.session_id,
-      interviewNumber: iv.interview_number,
-      blueprintTitle: iv.blueprint_title,
-      score: iv.overall_score,
-      grade: iv.grade,
-      completedAt: iv.completed_at,
-      level: iv.level,
-    }));
+    const historyData = await this.getInterviewHistory(studentId);
 
-    const trends = allCompleted.map(iv => ({
-      score: iv.overall_score,
-      date: iv.completed_at,
-      interviewNumber: iv.interview_number,
-      title: iv.blueprint_title,
-      sessionId: iv.session_id,
+    const recentInterviews = (historyData.history.length > 0 ? historyData.history.slice(0, 10) : allCompleted.slice(-10).reverse()).map(iv => {
+      const isCompleted = iv.is_completed ?? (iv.status === 'completed' || iv.status === 'ended' || Boolean(iv.completedAt || iv.completed_at) || Boolean(iv.grade));
+      return {
+        id: iv.id || iv._id || iv.sessionId || iv.session_id,
+        sessionId: iv.sessionId || iv.session_id,
+        interviewNumber: iv.interviewNumber || iv.interview_number,
+        blueprintTitle: iv.title || iv.blueprintTitle || iv.blueprint_title,
+        score: iv.score ?? iv.overall_score,
+        grade: iv.grade,
+        completedAt: iv.completedAt || iv.completed_at,
+        level: iv.level,
+        status: isCompleted ? 'completed' : (iv.status || 'in_progress'),
+        is_completed: isCompleted,
+        can_retake: true,
+      };
+    });
+
+    const trends = (historyData.history.filter(h => h.is_completed && h.score != null).length > 0
+      ? historyData.history.filter(h => h.is_completed && h.score != null)
+      : allCompleted
+    ).map(iv => ({
+      score: iv.score ?? iv.overall_score,
+      date: iv.completedAt || iv.completed_at,
+      interviewNumber: iv.interviewNumber || iv.interview_number,
+      title: iv.title || iv.blueprintTitle || iv.blueprint_title,
+      sessionId: iv.sessionId || iv.session_id,
     }));
 
     return {
@@ -567,15 +639,26 @@ export class JourneyService {
       currentLevelName: currentLevelObj?.name || 'Foundation',
       placementReadiness: readinessScore,
       averageScore: Math.round(avgScore * 10) / 10,
-      completedInterviews: completedCount,
+      completedInterviews: Math.max(completedCount, historyData.completed_count),
+      completed_interviews: Math.max(completedCount, historyData.completed_count),
+      totalAccessed: historyData.total_accessed,
+      total_accessed: historyData.total_accessed,
+      inProgressInterviews: historyData.in_progress_count,
+      in_progress_interviews: historyData.in_progress_count,
       allowedInterviews: maxInterviews,
       remainingInterviews: remaining,
       progressPercentage: progressPct,
       currentPlan: subscription,
       nextInterviewAvailable: nextAvailable,
+      nextInterview,
+      next_interview: nextInterview,
       levels,
+      journeyInterviews,
+      allInterviews: journeyInterviews,
       recentInterviews,
       trends,
+      interviewsHistory: historyData.history,
+      history: historyData.history,
       accessLevel,
       targetCareerGoal: journey.target_career_goal || '',
       stream,
@@ -591,18 +674,11 @@ export class JourneyService {
 
     const gapDays = 0;
     let nextUnlockAt = null;
-    let allowed = completedCount < maxInterviews;
-
-    if (allowed && lastInterviewAt && gapDays > 0) {
-      const nextTime = new Date(lastInterviewAt).getTime() + gapDays * 24 * 60 * 60 * 1000;
-      if (Date.now() < nextTime) {
-        allowed = false;
-        nextUnlockAt = new Date(nextTime).toISOString();
-      }
-    }
 
     return {
-      allowed,
+      allowed: true, // Attended interviews can be attended ANY times or multiple times!
+      can_start: true,
+      can_retake: true,
       interviewsUsed: completedCount,
       interviewsTotal: maxInterviews,
       remaining: Math.max(0, maxInterviews - completedCount),
@@ -637,13 +713,11 @@ export class JourneyService {
   }
 
   _getMaxInterviewsForAccess(accessLevel) {
-    let max = 0;
-    for (const level of LEVELS) {
-      if (level.level <= accessLevel) {
-        max = level.interview_range[1];
-      }
-    }
-    return max;
+    const access = parseInt(accessLevel) || 0;
+    if (access >= 3) return 30;
+    if (access === 2) return 20;
+    if (access === 1) return 10;
+    return 4;
   }
 
   async getTrends(studentId) {
@@ -672,7 +746,7 @@ export class JourneyService {
       where: { student_id: studentId, status: 'completed' },
     });
 
-    const completion = (completedInterviews.length / 24) * 100;
+    const completion = (completedInterviews.length / 30) * 100;
     const avgScore = completedInterviews.length > 0
       ? completedInterviews.reduce((sum, iv) => sum + (iv.overall_score || 0), 0) / completedInterviews.length
       : 0;
@@ -713,6 +787,114 @@ export class JourneyService {
           : 0,
         uploaded_at: v.created_at,
       })),
+    };
+  }
+
+  async getInterviewHistory(studentId) {
+    const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+
+    const journeyInterviews = await JourneyInterview.findAll({
+      where: { student_id: studentId },
+      order: [['updated_at', 'DESC'], ['interview_number', 'ASC']],
+    });
+
+    const sessions = await InterviewSession.findAll({
+      where: { student_id: studentId },
+      order: [['created_at', 'DESC']],
+      limit: 100,
+    });
+
+    const reports = await InterviewReport.findAll({
+      where: { student_id: studentId },
+      order: [['created_at', 'DESC']],
+      limit: 100,
+    });
+
+    const reportMap = new Map();
+    for (const rep of reports) {
+      if (rep.session_id) reportMap.set(rep.session_id, rep);
+    }
+
+    const history = [];
+    const seenSessionIds = new Set();
+
+    for (const s of sessions) {
+      if (!s.session_id) continue;
+      seenSessionIds.add(s.session_id);
+
+      const rep = reportMap.get(s.session_id);
+      const isCompleted = s.status === 'ended' || s.status === 'completed' || Boolean(rep) || Boolean(s.completed_at) || Boolean(s.grade);
+      const score = rep?.overall?.percentage ?? (s.score != null ? s.score : null);
+      const grade = rep?.overall?.grade ?? s.grade ?? '';
+      const gradeLabel = rep?.overall?.grade_label ?? (score != null ? (score >= 80 ? 'Excellent' : score >= 60 ? 'Good' : 'Needs Practice') : '');
+
+      history.push({
+        id: s._id || s.session_id,
+        session_id: s.session_id,
+        interview_number: s.interview_number || null,
+        title: s.blueprint_title || `${s.role || 'Mock Interview'} Practice`,
+        role: s.role || 'Software Engineer',
+        domain: s.domain || 'General',
+        level: s.blueprint_level || 1,
+        status: isCompleted ? 'completed' : (s.status === 'active' ? 'in_progress' : 'incomplete'),
+        is_completed: isCompleted,
+        score: score != null ? Math.round(Number(score)) : null,
+        grade,
+        grade_label: gradeLabel,
+        question_count: s.question_count || 1,
+        max_questions: s.max_questions || 10,
+        started_at: s.created_at,
+        completed_at: rep?.created_at || s.completed_at || (isCompleted ? s.updated_at : null),
+        can_retake: true,
+        report_id: rep?.report_id || null,
+      });
+    }
+
+    for (const ji of journeyInterviews) {
+      if (ji.session_id && seenSessionIds.has(ji.session_id)) {
+        continue;
+      }
+      const rep = ji.session_id ? reportMap.get(ji.session_id) : null;
+      const isCompleted = ji.status === 'completed' || ji.status === 'ended' || Boolean(ji.completed_at) || Boolean(ji.grade) || Boolean(rep);
+      const score = isCompleted ? Math.round(Number(ji.overall_score ?? rep?.overall?.percentage ?? 0)) : null;
+
+      history.push({
+        id: ji._id || `ji-${ji.interview_number}`,
+        session_id: ji.session_id || null,
+        interview_number: ji.interview_number,
+        title: ji.blueprint_title || `Interview #${ji.interview_number}`,
+        role: 'Journey Interview',
+        domain: 'Placement Blueprint',
+        level: ji.level || 1,
+        status: isCompleted ? 'completed' : (ji.status === 'active' ? 'in_progress' : 'available'),
+        is_completed: isCompleted,
+        score,
+        grade: ji.grade || rep?.overall?.grade || '',
+        grade_label: ji.grade ? `Grade ${ji.grade}` : (isCompleted ? 'Completed' : 'In Progress'),
+        question_count: isCompleted ? 10 : 1,
+        max_questions: 10,
+        started_at: ji.started_at,
+        completed_at: ji.completed_at || rep?.created_at,
+        can_retake: true,
+        report_id: ji.report_id || rep?.report_id || null,
+      });
+    }
+
+    history.sort((a, b) => {
+      const dateA = new Date(a.completed_at || a.started_at || 0).getTime();
+      const dateB = new Date(b.completed_at || b.started_at || 0).getTime();
+      return dateB - dateA;
+    });
+
+    const totalAccessed = history.length;
+    const completedCount = history.filter(h => h.is_completed).length;
+    const inProgressCount = history.filter(h => !h.is_completed).length;
+
+    return {
+      total_accessed: totalAccessed,
+      completed_count: completedCount,
+      in_progress_count: inProgressCount,
+      history,
     };
   }
 
@@ -763,7 +945,7 @@ export class JourneyService {
 
     return {
       subscription: {
-        plan_key: accessLevel > 0 ? `level_1_${accessLevel}` : null,
+        plan_key: accessLevel > 0 ? `level_${accessLevel}` : null,
         status: accessLevel > 0 ? 'active' : 'none',
         interviews_used: completedInterviews,
         interviews_total: maxInterviews,
@@ -831,8 +1013,8 @@ export class JourneyService {
   // ═══════════════════════════════════════════════════════
 
   async assignJourneyAccess(studentId, accessLevel, assignedBy) {
-    if (accessLevel < 0 || accessLevel > 6) {
-      throw new Error('Invalid access level. Must be 0-6.');
+    if (accessLevel < 0 || accessLevel > 3) {
+      throw new Error('Invalid access level. Must be 0-3.');
     }
 
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
@@ -961,7 +1143,7 @@ export class JourneyService {
           status: j.status,
         } : null,
         subscription: {
-          plan_key: accessLevel > 0 ? `level_1_${accessLevel}` : null,
+          plan_key: accessLevel > 0 ? `level_${accessLevel}` : null,
           plan_name: accessLevel > 0 ? LEVELS.find(l => l.level === accessLevel)?.name || 'Unknown' : '—',
           status: accessLevel > 0 ? 'active' : 'none',
           interviews_used: j?.completed_interviews || 0,
@@ -1059,7 +1241,7 @@ export class JourneyService {
       interview_reports_counted: reportsCounted,
       subscription: {
         id: journey?._id || null,
-        plan_key: accessLevel > 0 ? `level_1_${accessLevel}` : null,
+        plan_key: accessLevel > 0 ? `level_${accessLevel}` : null,
         status: accessLevel > 0 ? 'active' : 'none',
         interviews_used: journey?.completed_interviews || 0,
         interviews_total: maxInterviews,
@@ -1088,9 +1270,12 @@ export class JourneyService {
 
   async getAdminPlans() {
     const PLAN_DETAILS = {
-      basic: { name: 'Basic', price: 499, interviews: 4, access_level: 1 },
-      advanced: { name: 'Advanced', price: 1199, interviews: 12, access_level: 3 },
-      professional: { name: 'Professional', price: 1999, interviews: 24, access_level: 6 },
+      starter: { name: 'Starter', price: 199, interviews: 10, access_level: 1 },
+      career: { name: 'Career', price: 499, interviews: 20, access_level: 2 },
+      placement_pro: { name: 'Placement Pro', price: 849, interviews: 30, access_level: 3 },
+      basic: { name: 'Starter', price: 199, interviews: 10, access_level: 1 },
+      advanced: { name: 'Career', price: 499, interviews: 20, access_level: 2 },
+      professional: { name: 'Placement Pro', price: 849, interviews: 30, access_level: 3 },
     };
     let paidPlans = [];
     try {
@@ -1117,7 +1302,7 @@ export class JourneyService {
         }));
     return {
       plans: LEVELS.map(lvl => ({
-        key: `level_1_${lvl.level}`,
+        key: `level_${lvl.level}`,
         name: lvl.name,
         level_access: lvl.level,
         interviews_total: lvl.interview_range[1],
@@ -1134,9 +1319,12 @@ export class JourneyService {
     await this.assignJourneyAccess(studentId, level, 'admin');
     const planInfo = await Plan.findOne({ where: { plan_key: planKey } });
     const PLAN_DETAILS = {
-      basic: { name: 'Basic', price: 499, interviews: 4 },
-      advanced: { name: 'Advanced', price: 1199, interviews: 12 },
-      professional: { name: 'Professional', price: 1999, interviews: 24 },
+      starter: { name: 'Starter', price: 199, interviews: 10 },
+      career: { name: 'Career', price: 499, interviews: 20 },
+      placement_pro: { name: 'Placement Pro', price: 849, interviews: 30 },
+      basic: { name: 'Starter', price: 199, interviews: 10 },
+      advanced: { name: 'Career', price: 499, interviews: 20 },
+      professional: { name: 'Placement Pro', price: 849, interviews: 30 },
     };
     const fallback = PLAN_DETAILS[planKey] || { name: planKey, price: 0, interviews: 0 };
 
@@ -1245,9 +1433,20 @@ export class JourneyService {
   }
 
   _levelFromPlanKey(planKey) {
-    const match = planKey.match(/level_1_(\d+)/);
-    if (match) return parseInt(match[1]);
-    const PLAN_LEVEL_MAP = { basic: 1, advanced: 3, professional: 6 };
+    if (!planKey) return 1;
+    const match = String(planKey).match(/level[_-]?(?:1[_-])?(\d+)/i);
+    if (match) return Math.min(3, Math.max(1, parseInt(match[1])));
+    const PLAN_LEVEL_MAP = {
+      level_1: 1,
+      level_2: 2,
+      level_3: 3,
+      starter: 1,
+      career: 2,
+      placement_pro: 3,
+      basic: 1,
+      advanced: 2,
+      professional: 3,
+    };
     return PLAN_LEVEL_MAP[planKey] || 1;
   }
 

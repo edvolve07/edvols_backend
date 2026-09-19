@@ -52,6 +52,18 @@ export const Plan = sequelize.define('Plan', {
     type: DataTypes.STRING(20),
     defaultValue: 'active',
   },
+  tagline: {
+    type: DataTypes.STRING(255),
+    defaultValue: '',
+  },
+  purpose: {
+    type: DataTypes.STRING(255),
+    defaultValue: '',
+  },
+  popular: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+  },
   features: {
     type: DataTypes.JSONB,
     defaultValue: [],

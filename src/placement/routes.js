@@ -62,6 +62,16 @@ router.use(asyncHandler(async (_req, _res, next) => {
 // HELPER: Gather all data for a single student (unchanged)
 // ═══════════════════════════════════════════════════════
 async function gatherStudentData(studentId) {
+  if (!studentId) {
+    return {
+      interviewHistory: [],
+      interviewSessions: [],
+      communicationReport: null,
+      resumeAnalysis: null,
+      journey: null,
+      completedInterviews: 0,
+    };
+  }
   const [interviewSessions, latestCommReport, latestResume, journey] = await Promise.all([
     InterviewSession.findAll({
       where: { student_id: studentId, status: { [Op.in]: ['completed', 'ended'] } },
@@ -217,6 +227,111 @@ router.get('/student/gaps', requireAuth, asyncHandler(async (req, res) => {
     strengths: profile.strengths,
     recommendations: profile.recommendations,
   });
+}));
+
+export async function getCareerProfile(studentId) {
+  if (!studentId) {
+    throw new HttpError(400, 'Student ID is required');
+  }
+  const [user, studentData] = await Promise.all([
+    User.findByPk(studentId),
+    gatherStudentData(studentId),
+  ]);
+
+  const profile = computeStudentProfile(studentData);
+  const journey = studentData.journey;
+  const targetRole = user?.targetRole || journey?.target_role || journey?.target_career_goal || 'Software Engineer';
+  const targetDomain = user?.stream || user?.targetDomain || 'Engineering';
+
+  const bandMap = {
+    PLACEMENT_READY: 'Placement Ready',
+    INTERVIEW_READY: 'Interview Ready',
+    DEVELOPMENT_REQUIRED: 'Development Required',
+    HIGH_INTERVENTION: 'High Intervention',
+    UNASSESSED: 'Unassessed',
+  };
+  const readinessBand = bandMap[profile.readinessBand] || 'Development Required';
+
+  const recommendedSteps = (profile.recommendations || []).slice(0, 3).map((r, idx) => ({
+    step: idx + 1,
+    title: r.area,
+    priority: r.priority,
+    action: r.suggestion,
+    target_improvement: r.targetImprovement || 0,
+  }));
+
+  const completedCount = journey?.completed_interviews || studentData.completedInterviews || 0;
+  if (recommendedSteps.length < 3) {
+    const nextIv = completedCount + 1;
+    if (nextIv <= 30) {
+      const blueprint = getBlueprintByNumber(nextIv);
+      recommendedSteps.push({
+        step: recommendedSteps.length + 1,
+        title: `Interview #${nextIv}: ${blueprint?.title || 'Next Session'}`,
+        priority: 'HIGH',
+        action: `Complete upcoming session focusing on ${blueprint?.focus_areas?.join(', ') || 'core placement competencies'}.`,
+        target_improvement: 10,
+      });
+    }
+  }
+  if (recommendedSteps.length < 3) {
+    recommendedSteps.push({
+      step: recommendedSteps.length + 1,
+      title: 'Resume ATS Enhancement',
+      priority: 'MODERATE',
+      action: 'Target ATS score of 85+ by tailoring resume keywords to your target domain.',
+      target_improvement: 15,
+    });
+  }
+  if (recommendedSteps.length < 3) {
+    recommendedSteps.push({
+      step: recommendedSteps.length + 1,
+      title: 'Company-Specific Mock Simulation',
+      priority: 'MODERATE',
+      action: 'Take a comprehensive mock interview simulating target tier-1 placement drives.',
+      target_improvement: 10,
+    });
+  }
+
+  const certificateEligible = completedCount >= 30;
+  const certificateStatus = certificateEligible ? 'eligible' : (completedCount >= 10 ? 'in_progress' : 'locked');
+
+  return {
+    student_id: studentId,
+    student_name: user?.name || '',
+    target_role: targetRole,
+    target_domain: targetDomain,
+    readiness_score: profile.overallReadiness,
+    readiness_band: readinessBand,
+    raw_band: profile.readinessBand,
+    assessment_confidence: profile.assessmentConfidence,
+    completed_interviews: completedCount,
+    total_interviews: 30,
+    current_level: journey?.current_level || 1,
+    competencies: profile.competencies,
+    competency_breakdown: COMPETENCIES.map(comp => ({
+      key: comp,
+      name: comp.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
+      score: profile.competencies[comp]?.score || 0,
+      weight: (DEFAULT_COMPETENCY_WEIGHTS[comp] || 0) * 100,
+      confidence: profile.competencies[comp]?.confidence || 'INSUFFICIENT',
+      data_points: profile.competencies[comp]?.dataPoints || 0,
+    })),
+    strengths: profile.strengths,
+    gaps: profile.gaps,
+    recommended_steps: recommendedSteps,
+    resume_ats_score: studentData.resumeAnalysis?.ats_score ?? null,
+    certificate_status: certificateStatus,
+    certificate_eligible: certificateEligible,
+  };
+}
+
+router.get('/student/career-profile', requireAuth, asyncHandler(async (req, res) => {
+  const studentId = req.user?._id || req.user?.user_id;
+  if (!studentId) throw new HttpError(401, 'Not authenticated');
+
+  const profile = await getCareerProfile(studentId);
+  res.json(profile);
 }));
 
 router.get('/student/trends', requireAuth, asyncHandler(async (req, res) => {

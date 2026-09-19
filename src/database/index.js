@@ -46,8 +46,11 @@ export { InstitutionModule } from './models/InstitutionModule.js';
 export { HelpRequest } from './models/HelpRequest.js';
 export { ReferralCampaign } from './models/ReferralCampaign.js';
 export { ReferralHistory } from './models/ReferralHistory.js';
+export { ReferralPayout } from './models/ReferralPayout.js';
+export { ReferralSetting } from './models/ReferralSetting.js';
 export { PlacementConfig } from './models/PlacementConfig.js';
 export { ScoringVersion } from './models/ScoringVersion.js';
 export { HumanValidation } from './models/HumanValidation.js';
+export { InstitutionContract } from './models/InstitutionContract.js';
 
 export const Op = Sequelize.Op;

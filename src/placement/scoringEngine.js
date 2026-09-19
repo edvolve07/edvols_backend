@@ -13,22 +13,22 @@
 import { activeScoringConfig } from './scoringContext.js';
 const COMPETENCIES = [
   'technical_knowledge',
-  'problem_solving',
+  'aptitude',
   'communication',
-  'project_knowledge',
-  'behavioral_skills',
-  'resume_profile',
+  'problem_solving',
   'interview_performance',
+  'resume_profile',
+  'behavioral_skills',
 ];
 
 const DEFAULT_COMPETENCY_WEIGHTS = {
-  technical_knowledge: 0.25,
-  problem_solving: 0.20,
+  technical_knowledge: 0.20,
+  aptitude: 0.15,
   communication: 0.15,
-  project_knowledge: 0.15,
-  behavioral_skills: 0.10,
+  problem_solving: 0.15,
+  interview_performance: 0.15,
   resume_profile: 0.10,
-  interview_performance: 0.05,
+  behavioral_skills: 0.10,
 };
 
 const DEFAULT_READINESS_BANDS = {
@@ -53,9 +53,11 @@ const DEFAULT_SEGMENTATION_THRESHOLDS = {
 const DEFAULT_TALENT_CRITERIA = {
   overall_readiness: 80,
   technical_knowledge: 75,
+  aptitude: 70,
   communication: 70,
   problem_solving: 70,
-  project_knowledge: 75,
+  interview_performance: 75,
+  behavioral_skills: 70,
 };
 
 function avg(arr) {
@@ -85,30 +87,36 @@ function categorizeQuestion(blueprintCategory, focusAreas = []) {
   const areas = (focusAreas || []).map(a => a.toLowerCase());
   const cat = (blueprintCategory || '').toLowerCase();
 
-  if (cat === 'foundation' || cat === 'professional' || cat === 'advanced' || cat === 'expert') {
-    if (areas.some(a => a.includes('technical') || a.includes('system') || a.includes('coding'))) {
-      return 'technical_knowledge';
-    }
-    if (areas.some(a => a.includes('project') || a.includes('portfolio'))) {
-      return 'project_knowledge';
-    }
-    if (areas.some(a => a.includes('behavioral') || a.includes('stress') || a.includes('cultural') || a.includes('leadership'))) {
-      return 'behavioral_skills';
-    }
-    if (areas.some(a => a.includes('communication') || a.includes('negotiation'))) {
-      return 'communication';
-    }
-    if (areas.some(a => a.includes('problem') || a.includes('design'))) {
-      return 'problem_solving';
-    }
+  if (areas.some(a => a.includes('aptitude') || a.includes('quantitative') || a.includes('logical') || a.includes('reasoning') || a.includes('analytical'))) {
+    return 'aptitude';
+  }
+  if (areas.some(a => a.includes('technical') || a.includes('system') || a.includes('coding') || a.includes('algorithm') || a.includes('data structure') || a.includes('programming') || a.includes('project') || a.includes('architecture'))) {
+    return 'technical_knowledge';
+  }
+  if (areas.some(a => a.includes('problem') || a.includes('design') || a.includes('decomposition') || a.includes('tradeoff'))) {
+    return 'problem_solving';
+  }
+  if (areas.some(a => a.includes('behavioral') || a.includes('stress') || a.includes('cultural') || a.includes('leadership') || a.includes('hr') || a.includes('culture') || a.includes('star'))) {
+    return 'behavioral_skills';
+  }
+  if (areas.some(a => a.includes('communication') || a.includes('negotiation') || a.includes('articulation') || a.includes('presentation'))) {
+    return 'communication';
+  }
+  if (areas.some(a => a.includes('resume') || a.includes('claim') || a.includes('portfolio'))) {
+    return 'resume_profile';
+  }
+  if (areas.some(a => a.includes('mock') || a.includes('simulation') || a.includes('interview'))) {
+    return 'interview_performance';
   }
 
   const title = (blueprintCategory || '').toLowerCase();
-  if (title.includes('technical') || title.includes('domain')) return 'technical_knowledge';
-  if (title.includes('project') || title.includes('portfolio')) return 'project_knowledge';
-  if (title.includes('behavioral') || title.includes('cultural') || title.includes('stress')) return 'behavioral_skills';
-  if (title.includes('communication') || title.includes('negotiation')) return 'communication';
+  if (title.includes('aptitude') || title.includes('logical') || title.includes('reasoning')) return 'aptitude';
+  if (title.includes('technical') || title.includes('domain') || title.includes('coding') || title.includes('project')) return 'technical_knowledge';
   if (title.includes('problem') || title.includes('design') || title.includes('system')) return 'problem_solving';
+  if (title.includes('behavioral') || title.includes('cultural') || title.includes('stress') || title.includes('hr')) return 'behavioral_skills';
+  if (title.includes('communication') || title.includes('negotiation')) return 'communication';
+  if (title.includes('resume') || title.includes('claim')) return 'resume_profile';
+  if (title.includes('mock') || title.includes('simulation') || title.includes('placement')) return 'interview_performance';
 
   return 'technical_knowledge';
 }
@@ -137,7 +145,7 @@ function computeCompetency(competency, interviewHistory, communicationReport, re
   switch (competency) {
     case 'technical_knowledge': {
       const techQuestions = interviewHistory.filter(h =>
-        h.category === 'technical_knowledge' || h.category === 'problem_solving'
+        h.category === 'technical_knowledge' || h.category === 'project_knowledge'
       );
       if (techQuestions.length === 0) break;
       dataPoints = techQuestions.length;
@@ -145,6 +153,29 @@ function computeCompetency(competency, interviewHistory, communicationReport, re
       const skillScores = techQuestions.map(h => normalizeTo100(h.evaluation?.skill_relevance || 0));
       score = round2(avg(knowledgeScores) * 0.7 + avg(skillScores) * 0.3);
       evidence.push(`Technical knowledge: avg knowledge=${avg(knowledgeScores).toFixed(1)}/100, skill_relevance=${avg(skillScores).toFixed(1)}/100 across ${dataPoints} questions`);
+      break;
+    }
+
+    case 'aptitude': {
+      const aptQuestions = interviewHistory.filter(h =>
+        h.category === 'aptitude' || (h.focus_areas && h.focus_areas.some(f => {
+          const fl = String(f).toLowerCase();
+          return fl.includes('aptitude') || fl.includes('logical') || fl.includes('reasoning') || fl.includes('analytical');
+        }))
+      );
+      if (aptQuestions.length > 0) {
+        dataPoints = aptQuestions.length;
+        const knScores = aptQuestions.map(h => normalizeTo100(h.evaluation?.knowledge || 0));
+        const srScores = aptQuestions.map(h => normalizeTo100(h.evaluation?.skill_relevance || 0));
+        score = round2(avg(knScores) * 0.5 + avg(srScores) * 0.5);
+        evidence.push(`Aptitude: avg knowledge=${avg(knScores).toFixed(1)}/100, skill_relevance=${avg(srScores).toFixed(1)}/100 across ${dataPoints} questions`);
+      } else if (interviewHistory.length > 0) {
+        const baseQuestions = interviewHistory.slice(0, 10);
+        dataPoints = baseQuestions.length;
+        const knScores = baseQuestions.map(h => normalizeTo100(h.evaluation?.knowledge || 0));
+        score = round2(avg(knScores));
+        evidence.push(`Aptitude (baseline from foundational performance): ${score}/100 across ${dataPoints} questions`);
+      }
       break;
     }
 
@@ -451,6 +482,14 @@ function generateRecommendations(competencies, gaps) {
           area: 'Technical Knowledge',
           priority: gap.priority,
           suggestion: 'Focus on strengthening core technical concepts through targeted practice interviews and coding exercises.',
+          targetImprovement: gap.gap,
+        });
+        break;
+      case 'aptitude':
+        recommendations.push({
+          area: 'Aptitude & Reasoning',
+          priority: gap.priority,
+          suggestion: 'Practice quantitative aptitude and logical reasoning questions to improve analytical speed and problem formulation.',
           targetImprovement: gap.gap,
         });
         break;

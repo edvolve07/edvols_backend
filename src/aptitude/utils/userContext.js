@@ -53,7 +53,7 @@ export async function buildUserContext(userId) {
       data.current_level = journey.current_level || 1;
       data.current_interview_number = journey.current_interview_number || 1;
       data.completed_interviews = journey.completed_interviews || 0;
-      data.total_interviews = journey.total_interviews || 24;
+      data.total_interviews = journey.total_interviews || 30;
       data.overall_score = journey.overall_score || 0;
       data.readiness_score = journey.readiness_score || 0;
       data.journey_status = journey.status || 'not_started';

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { requireAuth, requireRole } from '../aptitude/middleware/auth.js';
 import { asyncHandler, HttpError } from '../utils/httpError.js';
 import { getSequelize } from '../database/connection.js';
-import { Subscription, PaymentTransaction, StudentJourney, User, Admin, Student, Plan, ReferralCampaign, IndividualStudent } from '../database/index.js';
+import { Subscription, PaymentTransaction, StudentJourney, User, Admin, Student, Plan, ReferralCampaign, IndividualStudent, InstitutionContract } from '../database/index.js';
 import { config } from '../config.js';
 import { validateReferralCode, applyReferralReward, computeReferralDiscount } from '../referral/service.js';
 import { sendWelcomeEmail } from '../services/emailService.js';
@@ -11,32 +11,132 @@ import jwt from 'jsonwebtoken';
 
 const router = Router();
 
-const PLANS = {
-  basic: {
-    key: 'basic',
-    name: 'Basic',
+const FALLBACK_PLANS = {
+  starter: {
+    key: 'starter',
+    name: 'Starter',
     access_level: 1,
-    interviews_total: 4,
+    interviews_total: 10,
     amount: 199,
-    features: ['Level 1 Journey Access', '4 AI Interviews', 'Resume Builder', 'Reports & Analytics'],
+    total_amount: 199,
+    purpose: 'Level 1: Foundation & Baseline',
+    tagline: 'Diagnostic Assessment & 10 Foundational Interviews',
+    popular: false,
+    duration_months: 1,
+    features: [
+      'Level 1: Foundation (1–10 Sessions)',
+      'Foundation Mock Evaluation (#10)',
+      'Placement Readiness Assessment',
+      'Resume ATS Analysis',
+      'Aptitude Assessment',
+      'Technical Knowledge Diagnostic',
+      'Skill-Gap Analysis',
+      'Performance Report',
+    ],
   },
-  advanced: {
-    key: 'advanced',
-    name: 'Advanced',
-    access_level: 3,
-    interviews_total: 12,
+  career: {
+    key: 'career',
+    name: 'Career',
+    access_level: 2,
+    interviews_total: 20,
     amount: 499,
-    features: ['Levels 1-3 Journey Access', '12 AI Interviews', 'Resume Builder', 'Reports & Analytics', 'Programming Practice', 'Communication Skills'],
+    total_amount: 499,
+    popular: true,
+    purpose: 'Levels 1 & 2: Skill Development & Mastery',
+    tagline: 'Targeted Skill Development & 20 Progressive Interviews',
+    duration_months: 3,
+    features: [
+      'Starter Features Included',
+      'Levels 1 & 2 (1–20 Structured Sessions)',
+      'Intermediate Mock Evaluation (#20)',
+      'System Architecture & STAR Scenarios',
+      'Technical & HR Practice',
+      'Aptitude & Communication Practice',
+      'Personalized Improvement Recommendations',
+      'Full Competency Gap Breakdown',
+    ],
   },
-  professional: {
-    key: 'professional',
-    name: 'Professional',
-    access_level: 6,
-    interviews_total: 24,
+  placement_pro: {
+    key: 'placement_pro',
+    name: 'Placement Pro',
+    access_level: 3,
+    interviews_total: 30,
     amount: 849,
-    features: ['All 6 Levels Journey Access', '24 AI Interviews', 'Resume Builder', 'Reports & Analytics', 'Programming Practice', 'Communication Skills', 'Certificates', 'Priority Support'],
+    total_amount: 849,
+    popular: false,
+    purpose: 'Complete Placement Ready Simulation',
+    tagline: 'Full 30-Interview Progression & Official Certification',
+    duration_months: 6,
+    features: [
+      'Career Features Included',
+      'All 3 Levels (1–30 Full Progression)',
+      'Final Placement Simulation (#30)',
+      'Executive Leadership & Pressure Rounds',
+      'Verified Placement Readiness Certificate',
+      'Official Weighted Placement Scorecard',
+      'Priority Retakes & 1-on-1 Support',
+    ],
   },
 };
+
+// Aliases for seamless backward compatibility
+FALLBACK_PLANS.basic = { ...FALLBACK_PLANS.starter, key: 'basic', alias_for: 'starter' };
+FALLBACK_PLANS.advanced = { ...FALLBACK_PLANS.career, key: 'advanced', alias_for: 'career' };
+FALLBACK_PLANS.professional = { ...FALLBACK_PLANS.placement_pro, key: 'professional', alias_for: 'placement_pro' };
+
+let cachedPlansMap = null;
+let lastPlansFetchTime = 0;
+
+export async function getActivePlansMap() {
+  const now = Date.now();
+  if (cachedPlansMap && (now - lastPlansFetchTime < 60000)) {
+    return cachedPlansMap;
+  }
+  try {
+    const dbPlans = await Plan.findAll({
+      where: { status: 'active' },
+      order: [['price', 'ASC']],
+    });
+    if (dbPlans && dbPlans.length > 0) {
+      const map = {};
+      for (const p of dbPlans) {
+        map[p.plan_key] = {
+          key: p.plan_key,
+          name: p.plan_name,
+          access_level: p.journey_access || p.max_level || 1,
+          interviews_total: p.total_interviews,
+          amount: p.price,
+          total_amount: p.price,
+          duration_months: p.duration_months || 1,
+          purpose: p.purpose || '',
+          tagline: p.tagline || '',
+          popular: Boolean(p.popular),
+          features: p.features || [],
+        };
+      }
+      if (map['starter'] && !map['basic']) {
+        map['basic'] = { ...map['starter'], key: 'basic', alias_for: 'starter' };
+      }
+      if (map['career'] && !map['advanced']) {
+        map['advanced'] = { ...map['career'], key: 'advanced', alias_for: 'career' };
+      }
+      if (map['placement_pro'] && !map['professional']) {
+        map['professional'] = { ...map['placement_pro'], key: 'professional', alias_for: 'placement_pro' };
+      }
+      cachedPlansMap = map;
+      lastPlansFetchTime = now;
+      return map;
+    }
+  } catch (_e) {}
+
+  return FALLBACK_PLANS;
+}
+
+export async function resolvePlan(key) {
+  if (!key) return null;
+  const plans = await getActivePlansMap();
+  return plans[key] || plans[String(key).toLowerCase()] || null;
+}
 
 function getRazorpayClient() {
   const key_id = process.env.RAZORPAY_KEY_ID;
@@ -55,31 +155,28 @@ function generateInvoiceNumber() {
   return `INV-${ym}-${rand}`;
 }
 
-router.get('/plans', requireAuth, asyncHandler(async (req, res) => {
-  const plans = Object.values(PLANS).map(p => ({
-    key: p.key,
-    name: p.name,
-    access_level: p.access_level,
-    interviews_total: p.interviews_total,
-    amount: p.amount,
-    total_amount: p.amount,
-    features: p.features,
-  }));
+router.get('/plans', asyncHandler(async (req, res) => {
+  const plansMap = await getActivePlansMap();
+  const distinctKeys = ['starter', 'career', 'placement_pro'];
+  const plans = distinctKeys
+    .map((k) => plansMap[k])
+    .filter(Boolean);
+
   res.json({ plans });
 }));
 
 router.post('/create-order', requireAuth, requireRole('individual_student'), asyncHandler(async (req, res) => {
   const { plan_key, referral_code } = req.body || {};
-  if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
+  const plan = await resolvePlan(plan_key);
+  if (!plan) throw new HttpError(400, 'Invalid plan key');
 
   let discountInfo = null;
   if (referral_code) {
     const validation = await validateReferralCode(referral_code, req.user._id);
     if (!validation.valid) throw new HttpError(400, validation.error);
-    discountInfo = computeReferralDiscount(validation.campaign, PLANS[plan_key].amount, plan_key);
+    discountInfo = await computeReferralDiscount(validation.campaign, plan.amount, plan.key);
   }
 
-  const plan = PLANS[plan_key];
   const totalAmount = discountInfo ? discountInfo.finalAmount : plan.amount;
   const discountAmount = discountInfo ? discountInfo.discount : 0;
 
@@ -130,9 +227,9 @@ router.post('/create-order', requireAuth, requireRole('individual_student'), asy
 
 router.post('/verify', requireAuth, requireRole('individual_student'), asyncHandler(async (req, res) => {
   const { plan_key, razorpay_order_id, razorpay_payment_id, razorpay_signature, referral_code } = req.body || {};
-  if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
+  const plan = await resolvePlan(plan_key);
+  if (!plan) throw new HttpError(400, 'Invalid plan key');
 
-  const plan = PLANS[plan_key];
   const studentId = req.user._id;
 
   let discountAmount = 0;
@@ -142,7 +239,7 @@ router.post('/verify', requireAuth, requireRole('individual_student'), asyncHand
     const validation = await validateReferralCode(referral_code, studentId);
     if (validation.valid) {
       referralCampaign = validation.campaign;
-      const discountInfo = computeReferralDiscount(validation.campaign, plan.amount, plan_key);
+      const discountInfo = await computeReferralDiscount(validation.campaign, plan.amount, plan_key);
       discountAmount = discountInfo.discount;
       totalAmount = discountInfo.finalAmount;
     }
@@ -227,7 +324,7 @@ router.post('/verify', requireAuth, requireRole('individual_student'), asyncHand
   let referral_result = null;
   if (referral_code && referralCampaign) {
     try {
-      referral_result = await applyReferralReward(referralCampaign._id, referralCampaign.owner_user_id, studentId, subscription._id);
+      referral_result = await applyReferralReward(referralCampaign._id, referralCampaign.owner_user_id, studentId, subscription._id, totalAmount);
     } catch (_err) {
       // Referral reward failure should not block the subscription
     }
@@ -263,8 +360,8 @@ router.post(
     }
 
     const targetLevel = parseInt(plan_key.replace('level_upgrade_', ''), 10);
-    if (!targetLevel || targetLevel < 1 || targetLevel > 6) {
-      throw new HttpError(400, 'Invalid target level');
+    if (!targetLevel || targetLevel < 1 || targetLevel > 3) {
+      throw new HttpError(400, 'Invalid target level (must be 1-3)');
     }
 
     const currentSub = await Subscription.findOne({
@@ -277,13 +374,11 @@ router.post(
       throw new HttpError(400, 'Target level must be higher than current level');
     }
 
-    const preview = calculateLevelUpgrade(currentLevel, targetLevel);
-    const studentId = req.user._id;
-
     const razorpay = getRazorpayClient();
     if (razorpay && razorpay_order_id && razorpay_payment_id && razorpay_signature) {
       const crypto = await import('node:crypto');
-      const expectedSig = crypto.createHmac('sha256', razorpay.key_secret)
+      const expectedSig = crypto
+        .createHmac('sha256', razorpay.key_secret)
         .update(`${razorpay_order_id}|${razorpay_payment_id}`)
         .digest('hex');
       if (expectedSig !== razorpay_signature) {
@@ -291,12 +386,14 @@ router.post(
       }
     }
 
-    const invoiceNumber = generateInvoiceNumber();
+    const preview = calculateLevelUpgrade(currentLevel, targetLevel);
+    const studentId = req.user._id;
 
     if (currentSub) {
       await currentSub.update({ status: 'upgraded' });
     }
 
+    const invoiceNumber = generateInvoiceNumber();
     const levelName = `Level ${currentLevel + 1}${targetLevel > currentLevel + 1 ? `\u2013${targetLevel}` : ''}`;
 
     const newSub = await Subscription.create({
@@ -304,7 +401,7 @@ router.post(
       plan_key: `level_upgrade_${targetLevel}`,
       plan_name: `Level Upgrade to ${targetLevel}`,
       access_level: targetLevel,
-      interviews_total: targetLevel * 4,
+      interviews_total: targetLevel * 10,
       status: 'active',
       razorpay_order_id: razorpay_order_id || null,
       razorpay_payment_id: razorpay_payment_id || null,
@@ -459,37 +556,33 @@ router.get('/invoice/:transactionId', requireAuth, requireRole('individual_stude
   });
 }));
 
-const LEVEL_PRICE = 199;
-const BULK_DISCOUNT_LEVELS = 2;
-const BULK_DISCOUNT_RATE = 0.25;
+export const LEVEL_PRICES = { 1: 199, 2: 499, 3: 849 };
 
-function calculateLevelUpgrade(currentLevel, targetLevel) {
+export function calculateLevelUpgrade(currentLevel, targetLevel) {
   if (targetLevel <= currentLevel) return null;
+  const currentPrice = LEVEL_PRICES[currentLevel] || 0;
+  const targetPrice = LEVEL_PRICES[targetLevel] || 849;
+  const upgradeCost = Math.max(0, targetPrice - currentPrice);
   const levelsCount = targetLevel - currentLevel;
-  const basePrice = levelsCount * LEVEL_PRICE;
-  const hasDiscount = levelsCount >= BULK_DISCOUNT_LEVELS;
-  const discountAmount = hasDiscount ? Math.round(basePrice * BULK_DISCOUNT_RATE) : 0;
-  const finalPrice = basePrice - discountAmount;
-  const totalAmount = finalPrice;
   return {
     levels_count: levelsCount,
     current_level: currentLevel,
     target_level: targetLevel,
-    price_per_level: LEVEL_PRICE,
-    base_price: basePrice,
-    has_discount: hasDiscount,
-    discount_percentage: hasDiscount ? 25 : 0,
-    discount_amount: discountAmount,
-    final_price: finalPrice,
+    price_per_level: Math.round(upgradeCost / levelsCount),
+    base_price: upgradeCost,
+    has_discount: false,
+    discount_percentage: 0,
+    discount_amount: 0,
+    final_price: upgradeCost,
     gst_amount: 0,
-    total_amount: totalAmount,
+    total_amount: upgradeCost,
   };
 }
 
 router.get('/upgrade-preview', requireAuth, requireRole('individual_student'), asyncHandler(async (req, res) => {
   const { target_level } = req.query;
   const target = parseInt(target_level);
-  if (!target || target < 1 || target > 6) throw new HttpError(400, 'Target level must be 1-6');
+  if (!target || target < 1 || target > 3) throw new HttpError(400, 'Target level must be 1-3');
 
   const currentSub = await Subscription.findOne({
     where: { student_id: req.user._id, status: 'active' },
@@ -510,7 +603,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const { target_level } = req.body || {};
     const target = parseInt(target_level);
-    if (!target || target < 1 || target > 6) throw new HttpError(400, "Target level must be 1-6");
+    if (!target || target < 1 || target > 3) throw new HttpError(400, "Target level must be 1-3");
 
     const currentSub = await Subscription.findOne({
       where: { student_id: req.user._id, status: "active" },
@@ -568,7 +661,7 @@ router.post(
 router.post('/upgrade-level', requireAuth, requireRole('individual_student'), asyncHandler(async (req, res) => {
   const { target_level, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
   const target = parseInt(target_level);
-  if (!target || target < 1 || target > 6) throw new HttpError(400, 'Target level must be 1-6');
+  if (!target || target < 1 || target > 3) throw new HttpError(400, 'Target level must be 1-3');
 
   const currentSub = await Subscription.findOne({
     where: { student_id: req.user._id, status: 'active' },
@@ -604,7 +697,7 @@ router.post('/upgrade-level', requireAuth, requireRole('individual_student'), as
     plan_key: `level_upgrade_${target}`,
     plan_name: `Level Upgrade to ${target}`,
     access_level: target,
-    interviews_total: target * 4,
+    interviews_total: target * 10,
     status: 'active',
     razorpay_order_id: razorpay_order_id || null,
     razorpay_payment_id: razorpay_payment_id || null,
@@ -834,8 +927,8 @@ router.patch('/admin/individual-students/:studentId/subscription', requireAuth, 
   }
 
   if (action === 'upgrade' || action === 'assign') {
-    if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
-    const plan = PLANS[plan_key];
+    const plan = await resolvePlan(plan_key);
+    if (!plan) throw new HttpError(400, 'Invalid plan key');
 
     if (currentSub) {
       await currentSub.update({ status: 'upgraded' });
@@ -938,17 +1031,17 @@ router.post('/check-email', asyncHandler(async (req, res) => {
 
 router.post('/guest-create-order', asyncHandler(async (req, res) => {
   const { plan_key, referral_code } = req.body || {};
-  if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
+  const plan = await resolvePlan(plan_key);
+  if (!plan) throw new HttpError(400, 'Invalid plan key');
 
   let discountInfo = null;
   if (referral_code) {
     const validation = await validateReferralCode(referral_code, null);
     if (validation.valid) {
-      discountInfo = computeReferralDiscount(validation.campaign, PLANS[plan_key].amount, plan_key);
+      discountInfo = await computeReferralDiscount(validation.campaign, plan.amount, plan.key);
     }
   }
 
-  const plan = PLANS[plan_key];
   const totalAmount = discountInfo ? discountInfo.finalAmount : plan.amount;
   const discountAmount = discountInfo ? discountInfo.discount : 0;
 
@@ -976,7 +1069,7 @@ router.post('/guest-create-order', asyncHandler(async (req, res) => {
     body: JSON.stringify({
       amount: totalAmount * 100,
       currency: 'INR',
-      receipt: `rcpt_guest_${plan_key}_${Date.now().toString(36)}`,
+      receipt: `rcpt_guest_${plan.key}_${Date.now().toString(36)}`,
     }),
   });
 
@@ -999,10 +1092,9 @@ router.post('/guest-create-order', asyncHandler(async (req, res) => {
 
 router.post('/guest-verify', asyncHandler(async (req, res) => {
   const { plan_key, name, email, password, razorpay_order_id, razorpay_payment_id, razorpay_signature, referral_code, stream, interested_role, college_name, college_address, course_details } = req.body || {};
-  if (!plan_key || !PLANS[plan_key]) throw new HttpError(400, 'Invalid plan key');
+  const plan = await resolvePlan(plan_key);
+  if (!plan) throw new HttpError(400, 'Invalid plan key');
   if (!name || !email || !password) throw new HttpError(400, 'Name, email, and password are required');
-
-  const plan = PLANS[plan_key];
 
   const razorpay = getRazorpayClient();
   if (razorpay && razorpay_order_id && razorpay_payment_id && razorpay_signature) {
@@ -1048,7 +1140,7 @@ router.post('/guest-verify', asyncHandler(async (req, res) => {
     const validation = await validateReferralCode(referral_code, user._id);
     if (validation.valid) {
       referralCampaign = validation.campaign;
-      const discountInfo = computeReferralDiscount(validation.campaign, plan.amount, plan_key);
+      const discountInfo = await computeReferralDiscount(validation.campaign, plan.amount, plan_key);
       discountAmount = discountInfo.discount;
       totalAmount = discountInfo.finalAmount;
     }
@@ -1116,7 +1208,7 @@ router.post('/guest-verify', asyncHandler(async (req, res) => {
   let referral_result = null;
   if (referralCampaign) {
     try {
-      referral_result = await applyReferralReward(referralCampaign._id, referralCampaign.owner_user_id, user._id, subscription._id);
+      referral_result = await applyReferralReward(referralCampaign._id, referralCampaign.owner_user_id, user._id, subscription._id, totalAmount);
     } catch (_err) {}
   }
 
@@ -1149,6 +1241,64 @@ router.post('/guest-verify', asyncHandler(async (req, res) => {
     },
     invoice: { number: invoiceNumber, amount: plan.amount, discount: discountAmount, gst: 0, total: totalAmount },
     referral_applied: referral_result?.applied || false,
+  });
+}));
+
+// GET /api/subscription/institution/contracts — list contracts for institution or all (master_admin)
+router.get('/institution/contracts', requireAuth, requireRole('admin', 'master_admin'), asyncHandler(async (req, res) => {
+  const where = {};
+  if (req.user.role === 'admin') {
+    where.institution_id = req.user.institutionId;
+  } else if (req.query.institution_id) {
+    where.institution_id = req.query.institution_id;
+  }
+  const contracts = await InstitutionContract.findAll({
+    where,
+    order: [['created_at', 'DESC']],
+  });
+  res.json({ contracts });
+}));
+
+// POST /api/subscription/institution/contracts — provision or renew institution contract (master_admin)
+router.post('/institution/contracts', requireAuth, requireRole('master_admin'), asyncHandler(async (req, res) => {
+  const {
+    institution_id,
+    plan_name,
+    total_licensed_students,
+    per_student_price,
+    contract_amount,
+    start_date,
+    end_date,
+    allowed_departments,
+    allowed_batches,
+    features,
+    notes,
+  } = req.body;
+
+  if (!institution_id) throw new HttpError(400, 'institution_id is required');
+  if (!total_licensed_students || total_licensed_students <= 0) {
+    throw new HttpError(400, 'total_licensed_students must be greater than 0');
+  }
+
+  const contract = await InstitutionContract.create({
+    institution_id,
+    plan_name: plan_name || 'Institution Placement Readiness Cohort',
+    total_licensed_students: parseInt(total_licensed_students),
+    per_student_price: per_student_price ? parseInt(per_student_price) : 0,
+    contract_amount: contract_amount ? parseInt(contract_amount) : (parseInt(total_licensed_students) * (per_student_price || 0)),
+    start_date: start_date ? new Date(start_date) : new Date(),
+    end_date: end_date ? new Date(end_date) : null,
+    allowed_departments: allowed_departments || ['all'],
+    allowed_batches: allowed_batches || [],
+    features: features || {},
+    notes: notes || '',
+    created_by: req.user._id,
+    status: 'active',
+  });
+
+  res.status(201).json({
+    message: 'Institution contract created successfully.',
+    contract,
   });
 }));
 

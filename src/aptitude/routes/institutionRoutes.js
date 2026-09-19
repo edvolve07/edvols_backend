@@ -509,7 +509,7 @@ router.get(
        FROM student_journeys sj
        JOIN users u ON u._id::text = sj.student_id
        WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
-         AND sj.journey_access_level IN (1, 3, 6)
+         AND sj.journey_access_level IN (1, 2, 3)
        GROUP BY u."institutionId", sj.journey_access_level`
     );
 
@@ -639,7 +639,7 @@ router.get(
        FROM student_journeys sj
        JOIN users u ON u._id::text = sj.student_id
        WHERE u."institutionId" IS NOT NULL AND u.role = 'student'
-         AND sj.journey_access_level IN (1, 3, 6)
+         AND sj.journey_access_level IN (1, 2, 3)
        GROUP BY u."institutionId", sj.journey_access_level`
     );
 

@@ -22,10 +22,18 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { badRequest, forbidden, notFound } from '../utils/httpError.js';
 import { toStudentQuestion } from '../utils/questionValidation.js';
 import { INVALID_PROBLEM_TITLE_PATTERN } from '../../programming/utils/problemVisibility.js';
+import { getCareerProfile } from '../../placement/routes.js';
 
 const router = express.Router();
 
 router.use(requireAuth, requireRole(ROLES.STUDENT, ROLES.INDIVIDUAL_STUDENT));
+
+router.get('/career-profile', asyncHandler(async (req, res) => {
+  const studentId = req.user?._id || req.user?.user_id;
+  if (!studentId) return res.status(401).json({ error: 'Not authenticated' });
+  const profile = await getCareerProfile(studentId);
+  res.json(profile);
+}));
 
 async function serializeAssessment(assessment) {
   const totalQuestions = await Question.count({

@@ -45,7 +45,7 @@ export const StudentJourney = sequelize.define('StudentJourney', {
   },
   total_interviews: {
     type: DataTypes.INTEGER,
-    defaultValue: 24,
+    defaultValue: 30,
   },
   overall_score: {
     type: DataTypes.FLOAT,

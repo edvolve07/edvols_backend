@@ -54,7 +54,7 @@ function toSafeJSON(user) {
     journey_access_level: user.journey_access_level || 0,
     current_interview_number: user.current_interview_number || 1,
     completed_interviews: user.completed_interviews || 0,
-    total_interviews: user.total_interviews || 24,
+    total_interviews: user.total_interviews || 30,
     overall_score: user.overall_score || 0,
     readiness_score: user.readiness_score || 0,
     journey_status: user.journey_status || 'not_started',
@@ -141,7 +141,7 @@ router.post(
 router.post(
   '/individual-signup',
   asyncHandler(async (req, res) => {
-    const { name, email, password, confirmPassword, plan_key, stream, interested_role, college_name, college_address, course_details } = req.body;
+    const { name, email, password, confirmPassword, phone, plan_key, stream, interested_role, college_name, college_address, course_details } = req.body;
     const errors = [];
 
     if (!name || name.trim().length < 2) errors.push('Full name is required');
@@ -159,6 +159,7 @@ router.post(
     const user = await User.create({
       name: name.trim(),
       email: normalizedEmail,
+      phone: phone ? String(phone).trim() : null,
       password_hash: passwordHash,
       role: 'individual_student',
       email_verified: true,
@@ -171,15 +172,35 @@ router.post(
       course_details: String(course_details || '').trim().slice(0, 255),
     });
 
-    const { getSequelize } = await import('../../database/index.js');
+    const { getSequelize, StudentJourney } = await import('../../database/index.js');
     await getSequelize().query(
       `INSERT INTO individual_students (_id, user_id, subscription_status, created_at, updated_at)
-       VALUES (gen_random_uuid(), :userId, 'inactive', NOW(), NOW())`,
+       VALUES (gen_random_uuid(), :userId, 'active', NOW(), NOW())`,
       { replacements: { userId: user._id } }
     );
 
+    const accessLevelMap = { basic: 1, starter: 1, advanced: 2, career: 2, professional: 3, placement_pro: 3 };
+    const initialAccessLevel = accessLevelMap[plan_key] || 1;
+    await StudentJourney.findOrCreate({
+      where: { student_id: user._id },
+      defaults: {
+        student_id: user._id,
+        student_name: user.name,
+        student_email: user.email,
+        journey_access_level: initialAccessLevel,
+        current_level: 1,
+        completed_interviews: 0,
+        total_interviews: 30,
+        status: 'not_started',
+      },
+    });
+
+    const safeUser = toSafeJSON(user);
+    safeUser.journey_access_level = initialAccessLevel;
+    safeUser.total_interviews = 30;
+
     res.status(201).json({
-      user: toSafeJSON(user),
+      user: safeUser,
       token: signToken(user),
       message: 'Account created successfully.',
     });

@@ -129,8 +129,15 @@ router.get('/interview/next', requireAuth, asyncHandler(async (req, res) => {
     focus_areas: blueprint.focus_areas,
     completed_interviews: completedCount,
     total_interviews: accessibleTotal,
-    all_completed: completedCount >= accessibleTotal,
+    all_completed: false, // Attended interviews can be attended ANY times or multiple times!
+    can_retake: true,
   });
+}));
+
+router.get('/interview/history', requireAuth, asyncHandler(async (req, res) => {
+  const studentId = getStudentId(req);
+  const result = await journeyService.getInterviewHistory(studentId);
+  res.json(result);
 }));
 
 router.get('/placement-progress', requireAuth, asyncHandler(async (req, res) => {
@@ -187,7 +194,12 @@ router.get('/subscription', requireAuth, asyncHandler(async (req, res) => {
 router.get('/lock-status', requireAuth, asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
   const result = await journeyService.getLockStatus(studentId);
-  res.json(result);
+  res.json({
+    ...result,
+    allowed: true, // Attended interviews can be attended ANY times or multiple times!
+    can_start: true,
+    can_retake: true,
+  });
 }));
 
 router.post('/subscribe', requireAuth, asyncHandler(async (req, res) => {

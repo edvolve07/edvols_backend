@@ -5,6 +5,10 @@ import { ReferralCampaign, ReferralHistory, User, Op } from '../database/index.j
 import {
   getAdminReferralStats,
   exportReferralReport,
+  getReferralProgramSettings,
+  updateReferralProgramSettings,
+  getAdminPayoutRequests,
+  processAdminPayoutRequest,
 } from './service.js';
 
 const router = Router();
@@ -159,6 +163,27 @@ router.delete('/campaigns/:id', requireAuth, requireRole('master_admin'), asyncH
 router.get('/export', requireAuth, requireRole('master_admin'), asyncHandler(async (req, res) => {
   const rows = await exportReferralReport();
   res.json({ rows });
+}));
+
+router.get('/settings', requireAuth, requireRole('master_admin'), asyncHandler(async (_req, res) => {
+  const settings = await getReferralProgramSettings();
+  res.json({ settings });
+}));
+
+router.put('/settings', requireAuth, requireRole('master_admin'), asyncHandler(async (req, res) => {
+  const updated = await updateReferralProgramSettings(req.body, req.user._id);
+  res.json({ success: true, settings: updated });
+}));
+
+router.get('/payouts', requireAuth, requireRole('master_admin'), asyncHandler(async (req, res) => {
+  const result = await getAdminPayoutRequests(req.query);
+  res.json(result);
+}));
+
+router.put('/payouts/:id', requireAuth, requireRole('master_admin'), asyncHandler(async (req, res) => {
+  const { status, utr_number, admin_notes } = req.body || {};
+  const result = await processAdminPayoutRequest(req.params.id, req.user._id, { status, utr_number, admin_notes });
+  res.json(result);
 }));
 
 export default router;

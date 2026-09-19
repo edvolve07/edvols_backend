@@ -19,8 +19,16 @@ const COMPETENCY_RUBRICS = {
     competency: 'technical_knowledge',
     metricWeights: { knowledge: 0.7, skill_relevance: 0.3 },
     description: 'Weighted average of knowledge (70%) and skill relevance (30%) from technical questions.',
-    appliesToBlueprintCategories: ['Foundation', 'Professional', 'Advanced', 'Expert'],
+    appliesToBlueprintCategories: ['Foundation', 'Skill Development', 'Placement Ready'],
     focusAreaKeywords: ['technical', 'system', 'coding', 'domain', 'industry'],
+  },
+
+  aptitude: {
+    competency: 'aptitude',
+    metricWeights: { knowledge: 0.5, skill_relevance: 0.5 },
+    description: 'Weighted average of quantitative aptitude and logical reasoning questions.',
+    appliesToBlueprintCategories: ['Foundation', 'Skill Development', 'Placement Ready'],
+    focusAreaKeywords: ['aptitude', 'logical', 'reasoning', 'analytical', 'quantitative'],
   },
 
   problem_solving: {

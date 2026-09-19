@@ -826,16 +826,13 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
     `, { replacements: { sid: studentId } });
     if (synced && synced.cnt > 0) {
       let newLevel = 1;
-      if (synced.cnt >= 22) newLevel = 6;
-      else if (synced.cnt >= 18) newLevel = 5;
-      else if (synced.cnt >= 12) newLevel = 4;
-      else if (synced.cnt >= 8) newLevel = 3;
-      else if (synced.cnt >= 4) newLevel = 2;
+      if (synced.cnt >= 20) newLevel = 3;
+      else if (synced.cnt >= 10) newLevel = 2;
       const readiness = Math.min(100, Math.round(
-        (synced.cnt / 24) * 40 +
+        (synced.cnt / 30) * 40 +
         (synced.avg_score / 100) * 35 +
-        (synced.cnt >= 4 ? 10 : (synced.cnt / 4) * 10) +
-        Math.min(15, (synced.cnt / 24) * 15)
+        (synced.cnt >= 10 ? 10 : (synced.cnt / 10) * 10) +
+        Math.min(15, (synced.cnt / 30) * 15)
       ));
       const [[existing]] = await getSequelize().query(
         `SELECT _id FROM student_journeys WHERE student_id = :sid LIMIT 1`,
@@ -850,7 +847,7 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
             readiness_score = :ready,
             started_at = COALESCE(started_at, :first),
             last_interview_at = :last,
-            status = CASE WHEN :cnt >= 24 THEN 'completed' WHEN :cnt > 0 THEN 'in_progress' ELSE status END
+            status = CASE WHEN :cnt >= 30 THEN 'completed' WHEN :cnt > 0 THEN 'in_progress' ELSE status END
           WHERE student_id = :sid
         `, { replacements: { cnt: synced.cnt, avg: synced.avg_score, lvl: newLevel, ready: readiness, first: synced.first_started, last: synced.last_completed, sid: studentId } });
       } else {
@@ -865,7 +862,7 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
           readiness_score: readiness,
           started_at: synced.first_started,
           last_interview_at: synced.last_completed,
-          status: synced.cnt >= 24 ? 'completed' : 'in_progress',
+          status: synced.cnt >= 30 ? 'completed' : 'in_progress',
         });
       }
     }
@@ -1241,7 +1238,7 @@ async function start() {
         current_level INTEGER DEFAULT 1,
         current_interview_number INTEGER DEFAULT 1,
         completed_interviews INTEGER DEFAULT 0,
-        total_interviews INTEGER DEFAULT 24,
+        total_interviews INTEGER DEFAULT 30,
         overall_score FLOAT DEFAULT 0,
         readiness_score FLOAT DEFAULT 0,
         status VARCHAR(20) DEFAULT 'not_started',
@@ -1608,22 +1605,22 @@ async function start() {
     if (planCount === 0) {
       const SEED_PLANS = [
         {
-          plan_key: 'basic', plan_name: 'Basic', duration_months: 1,
-          max_level: 1, journey_access: 1, total_interviews: 4,
+          plan_key: 'basic', plan_name: 'Level 1: Foundation', duration_months: 1,
+          max_level: 1, journey_access: 1, total_interviews: 10,
           price: 199, gst_percentage: 0, status: 'active',
-          features: ['Level 1 Journey Access', '4 AI Interviews', 'Resume Builder', 'Reports & Analytics'],
+          features: ['Level 1: Foundation (10 Interviews)', 'HR & Behavioral Fundamentals', 'Basic Aptitude & Technical Core', 'Detailed Performance Analytics', 'Interview Replay & Feedback'],
         },
         {
-          plan_key: 'advanced', plan_name: 'Advanced', duration_months: 3,
-          max_level: 3, journey_access: 3, total_interviews: 12,
+          plan_key: 'advanced', plan_name: 'Level 2: Skill Development', duration_months: 3,
+          max_level: 2, journey_access: 2, total_interviews: 20,
           price: 499, gst_percentage: 0, status: 'active',
-          features: ['Levels 1-3 Journey Access', '12 AI Interviews', 'Resume Builder', 'Reports & Analytics', 'Programming Practice', 'Communication Skills'],
+          features: ['Level 1 & 2 Access (20 Interviews)', 'Role-Specific Technical Rounds', 'System & Problem Solving Sessions', 'Intermediate Mock Evaluation (#20)', 'Programming & Aptitude Modules'],
         },
         {
-          plan_key: 'professional', plan_name: 'Professional', duration_months: 6,
-          max_level: 6, journey_access: 6, total_interviews: 24,
+          plan_key: 'professional', plan_name: 'Level 3: Placement Ready', duration_months: 6,
+          max_level: 3, journey_access: 3, total_interviews: 30,
           price: 849, gst_percentage: 0, status: 'active',
-          features: ['All 6 Levels Journey Access', '24 AI Interviews', 'Resume Builder', 'Reports & Analytics', 'Programming Practice', 'Communication Skills', 'Certificates', 'Priority Support'],
+          features: ['All 3 Levels (Complete 30 Interviews)', 'Placement Simulation Round (#30)', 'Verified Placement Readiness Certificate', 'Comprehensive Analytics & AI Insights', 'Priority 1-on-1 Feedback & Support'],
         },
       ];
       for (const p of SEED_PLANS) await Plan.upsert(p);
@@ -1783,7 +1780,7 @@ async function start() {
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS current_level INTEGER DEFAULT 1`);
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS current_interview_number INTEGER DEFAULT 1`);
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS completed_interviews INTEGER DEFAULT 0`);
-    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS total_interviews INTEGER DEFAULT 24`);
+    await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS total_interviews INTEGER DEFAULT 30`);
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS overall_score FLOAT DEFAULT 0`);
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS readiness_score FLOAT DEFAULT 0`);
     await sequelize.query(`ALTER TABLE student_journeys ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'not_started'`);
@@ -1856,20 +1853,17 @@ async function start() {
         completed_interviews = COALESCE(sub.cnt, 0),
         overall_score = COALESCE(sub.avg_score, 0),
         current_level = CASE
-          WHEN COALESCE(sub.cnt, 0) >= 22 THEN 6
-          WHEN COALESCE(sub.cnt, 0) >= 18 THEN 5
-          WHEN COALESCE(sub.cnt, 0) >= 12 THEN 4
-          WHEN COALESCE(sub.cnt, 0) >= 8 THEN 3
-          WHEN COALESCE(sub.cnt, 0) >= 4 THEN 2
+          WHEN COALESCE(sub.cnt, 0) >= 20 THEN 3
+          WHEN COALESCE(sub.cnt, 0) >= 10 THEN 2
           ELSE 1
         END,
         readiness_score = LEAST(100, ROUND(
-          (COALESCE(sub.cnt, 0) / 24.0) * 40 +
+          (COALESCE(sub.cnt, 0) / 30.0) * 40 +
           (COALESCE(sub.avg_score, 0) / 100.0) * 35 +
-          CASE WHEN COALESCE(sub.cnt, 0) >= 4 THEN 10 ELSE (COALESCE(sub.cnt, 0) / 4.0) * 10 END +
-          LEAST(15, (COALESCE(sub.cnt, 0) / 24.0) * 15)
+          CASE WHEN COALESCE(sub.cnt, 0) >= 10 THEN 10 ELSE (COALESCE(sub.cnt, 0) / 10.0) * 10 END +
+          LEAST(15, (COALESCE(sub.cnt, 0) / 30.0) * 15)
         )),
-        status = CASE WHEN COALESCE(sub.cnt, 0) >= 24 THEN 'completed' WHEN COALESCE(sub.cnt, 0) > 0 THEN 'in_progress' ELSE sj.status END,
+        status = CASE WHEN COALESCE(sub.cnt, 0) >= 30 THEN 'completed' WHEN COALESCE(sub.cnt, 0) > 0 THEN 'in_progress' ELSE sj.status END,
         started_at = CASE WHEN sj.started_at IS NULL AND COALESCE(sub.cnt, 0) > 0 THEN sub.first_started ELSE sj.started_at END,
         last_interview_at = sub.last_completed
       FROM (
