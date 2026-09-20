@@ -1934,6 +1934,73 @@ async function start() {
     console.log('Journey interviews backfill skipped:', _err.message);
   }
 
+  // ── Phase 5f: 3-Tier normalization for subscriptions & student journeys ────────
+  try {
+    await sequelize.query(`
+      UPDATE subscriptions
+      SET access_level = 2,
+          interviews_total = 20,
+          plan_name = 'Level 2: Skill Development'
+      WHERE status = 'active'
+        AND (
+          LOWER(plan_key) IN ('career', 'advanced', 'level_2', 'level_1_2')
+          OR (amount_paid >= 400 AND amount_paid < 700)
+        )
+        AND (access_level != 2 OR interviews_total != 20);
+
+      UPDATE subscriptions
+      SET access_level = 1,
+          interviews_total = 10,
+          plan_name = 'Level 1: Foundation'
+      WHERE status = 'active'
+        AND (
+          LOWER(plan_key) IN ('starter', 'basic', 'level_1', 'level_1_1')
+          OR (amount_paid >= 150 AND amount_paid < 400)
+        )
+        AND (access_level != 1 OR interviews_total != 10);
+
+      UPDATE subscriptions
+      SET access_level = 3,
+          interviews_total = 30,
+          plan_name = 'Level 3: Placement Ready'
+      WHERE status = 'active'
+        AND (
+          LOWER(plan_key) IN ('placement_pro', 'professional', 'level_3', 'level_1_3')
+          OR amount_paid >= 700
+        )
+        AND (access_level != 3 OR interviews_total != 30);
+
+      UPDATE student_journeys sj
+      SET journey_access_level = s.access_level,
+          total_interviews = 30,
+          current_level = CASE
+            WHEN COALESCE(sj.completed_interviews, 0) >= 20 THEN LEAST(3, s.access_level)
+            WHEN COALESCE(sj.completed_interviews, 0) >= 10 THEN LEAST(2, s.access_level)
+            ELSE 1
+          END
+      FROM subscriptions s
+      JOIN users u ON u._id = s.student_id
+      WHERE s.student_id = sj.student_id
+        AND s.status = 'active'
+        AND u.role = 'individual_student'
+        AND (sj.journey_access_level != s.access_level OR sj.total_interviews != 30 OR sj.current_level > s.access_level);
+
+      UPDATE individual_students ind
+      SET journey_access = s.access_level
+      FROM subscriptions s
+      WHERE s.student_id = ind.user_id
+        AND s.status = 'active'
+        AND ind.journey_access != s.access_level;
+
+      UPDATE plans SET journey_access = 1, total_interviews = 10, max_level = 1 WHERE LOWER(plan_key) IN ('starter', 'basic') OR price < 400;
+      UPDATE plans SET journey_access = 2, total_interviews = 20, max_level = 2 WHERE LOWER(plan_key) IN ('career', 'advanced') OR (price >= 400 AND price < 700);
+      UPDATE plans SET journey_access = 3, total_interviews = 30, max_level = 3 WHERE LOWER(plan_key) IN ('placement_pro', 'professional') OR price >= 700;
+    `);
+    console.log('Phase 5f: 3-Tier subscription & journey normalization completed');
+  } catch (_normErr) {
+    console.log('Phase 5f normalization skipped:', _normErr.message);
+  }
+
   // ── Help Requests table ─────────────────────────────────────────────────
   try {
     await sequelize.query(`

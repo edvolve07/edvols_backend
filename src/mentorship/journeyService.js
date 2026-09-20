@@ -1,10 +1,47 @@
 import { v4 as uuidv4 } from 'uuid';
 import { JourneyBlueprint, StudentJourney, JourneyInterview, InterviewSession, InterviewReport, User, ResumeVersion, Subscription, Plan, Institution } from '../database/index.js';
-import { LEVELS, BLUEPRINTS, getLevelForInterview, getBlueprintByNumber, isInterviewAccessible, getNextLockedInterview } from './blueprints.js';
+import { LEVELS, BLUEPRINTS, getLevelForInterview, getBlueprintByNumber, isInterviewAccessible, getNextLockedInterview, normalizePlanTier } from './blueprints.js';
 import { getSequelize, Op } from '../database/index.js';
 import { buildStudentWhere } from '../aptitude/utils/adminScope.js';
 
 export class JourneyService {
+
+  async getEffectiveAccessLevel(studentId, journey = null) {
+    if (!journey) {
+      journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+    }
+    const user = await User.findByPk(studentId);
+    // Institutional cohort students get full access to all 3 levels (30 interviews)
+    if (user?.role === 'student' || Boolean(journey?.institution_id)) {
+      return 3;
+    }
+
+    try {
+      const subscription = await Subscription.findOne({
+        where: { student_id: studentId, status: 'active' },
+        order: [['created_at', 'DESC']],
+      });
+      if (subscription) {
+        const norm = normalizePlanTier(subscription.plan_key, subscription.amount_paid, subscription.access_level);
+        if (subscription.access_level !== norm.level || subscription.interviews_total !== norm.interviews) {
+          await subscription.update({
+            access_level: norm.level,
+            interviews_total: norm.interviews,
+            plan_name: norm.name,
+          }).catch(() => {});
+        }
+        if (journey && (journey.journey_access_level !== norm.level || journey.total_interviews !== 30)) {
+          await journey.update({
+            journey_access_level: norm.level,
+            total_interviews: 30,
+          }).catch(() => {});
+        }
+        return norm.level;
+      }
+    } catch (_err) {}
+
+    return Number(journey?.journey_access_level) || 0;
+  }
 
   async getOrCreateJourney(studentId, studentName, studentEmail, institutionId) {
     let journey = await StudentJourney.findOne({ where: { student_id: studentId } });
@@ -18,7 +55,15 @@ export class JourneyService {
             order: [['created_at', 'DESC']],
           });
           if (subscription) {
-            accessLevel = subscription.access_level || 0;
+            const norm = normalizePlanTier(subscription.plan_key, subscription.amount_paid, subscription.access_level);
+            accessLevel = norm.level;
+            if (subscription.access_level !== norm.level || subscription.interviews_total !== norm.interviews) {
+              await subscription.update({
+                access_level: norm.level,
+                interviews_total: norm.interviews,
+                plan_name: norm.name,
+              }).catch(() => {});
+            }
             await getSequelize().query(
               `UPDATE individual_students SET subscription_id = :subId, subscription_status = 'active', journey_access = :access, updated_at = NOW() WHERE user_id = :uid`,
               { replacements: { subId: subscription._id, access: accessLevel, uid: studentId } }
@@ -30,28 +75,26 @@ export class JourneyService {
             );
             if (paymentTx) {
               const planKey = paymentTx.plan_key;
-              const plan = await Plan.findOne({ where: { plan_key: planKey } });
-              if (plan) {
-                accessLevel = plan.journey_access || 3;
-                const sub = await Subscription.create({
-                  student_id: studentId,
-                  plan_key: plan.plan_key,
-                  plan_name: plan.plan_name,
-                  plan_id: plan._id,
-                  access_level: accessLevel,
-                  interviews_total: plan.total_interviews || 50,
-                  status: 'active',
-                  amount_paid: paymentTx.amount || 0,
-                  currency: 'INR',
-                  gst_amount: 0,
-                  start_date: new Date(),
-                  end_date: null,
-                });
-                await getSequelize().query(
-                  `UPDATE individual_students SET subscription_id = :subId, subscription_status = 'active', journey_access = :access, updated_at = NOW() WHERE user_id = :uid`,
-                  { replacements: { subId: sub._id, access: accessLevel, uid: studentId } }
-                );
-              }
+              const norm = normalizePlanTier(planKey, paymentTx.amount);
+              accessLevel = norm.level;
+              const sub = await Subscription.create({
+                student_id: studentId,
+                plan_key: planKey || `level_${accessLevel}`,
+                plan_name: norm.name,
+                plan_id: null,
+                access_level: norm.level,
+                interviews_total: norm.interviews,
+                status: 'active',
+                amount_paid: paymentTx.amount || 0,
+                currency: 'INR',
+                gst_amount: 0,
+                start_date: new Date(),
+                end_date: null,
+              });
+              await getSequelize().query(
+                `UPDATE individual_students SET subscription_id = :subId, subscription_status = 'active', journey_access = :access, updated_at = NOW() WHERE user_id = :uid`,
+                { replacements: { subId: sub._id, access: accessLevel, uid: studentId } }
+              );
             }
           }
         }
@@ -64,6 +107,7 @@ export class JourneyService {
         student_email: studentEmail || '',
         institution_id: institutionId || null,
         journey_access_level: accessLevel,
+        total_interviews: 30,
         current_level: accessLevel > 0 ? 1 : 1,
         current_interview_number: 1,
         completed_interviews: 0,
@@ -116,9 +160,9 @@ export class JourneyService {
 
   async getLevels(studentId) {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
-    const currentLevel = journey?.current_level || 1;
-    const accessLevel = journey?.journey_access_level || 0;
+    const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
     const completedInterviews = journey?.completed_interviews || 0;
+    const currentLevel = Math.min(accessLevel || 1, completedInterviews >= 20 ? 3 : completedInterviews >= 10 ? 2 : 1);
 
     return {
       levels: LEVELS.map(lvl => ({
@@ -138,10 +182,7 @@ export class JourneyService {
 
   async getJourneyInterviews(studentId) {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
-    const user = await User.findByPk(studentId);
-    // Institutional cohort students get full access to all 3 levels (30 interviews)
-    const isInstitutional = user?.role === 'student' || Boolean(journey?.institution_id);
-    const accessLevel = isInstitutional ? 3 : (journey?.journey_access_level || 1);
+    const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
 
     const interviews = await JourneyInterview.findAll({
       where: { student_id: studentId },
@@ -236,6 +277,7 @@ export class JourneyService {
   async getAvailableInterview(studentId, transaction) {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId }, transaction });
     if (!journey) return null;
+    const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
 
     const interviews = await JourneyInterview.findAll({
       where: { student_id: studentId, status: 'completed' },
@@ -246,7 +288,7 @@ export class JourneyService {
     const completedNumbers = new Set(interviews.map(iv => iv.interview_number));
 
     for (const blueprint of BLUEPRINTS) {
-      if (!completedNumbers.has(blueprint.interview_number) && blueprint.level <= journey.journey_access_level) {
+      if (!completedNumbers.has(blueprint.interview_number) && blueprint.level <= accessLevel) {
         const dbBp = await JourneyBlueprint.findOne({ where: { interview_number: blueprint.interview_number }, transaction });
         return {
           interview_number: blueprint.interview_number,
@@ -265,6 +307,7 @@ export class JourneyService {
   async startInterview(studentId, studentName, studentEmail) {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
     if (!journey) throw new Error('No journey found. Contact your administrator to assign journey access.');
+    const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
 
     if (journey.institution_id) {
       const institution = await Institution.findByPk(journey.institution_id);
@@ -281,7 +324,7 @@ export class JourneyService {
 
     let nextInterview = await this.getAvailableInterview(studentId);
     if (!nextInterview) {
-      const firstAccessible = BLUEPRINTS.find(b => b.level <= journey.journey_access_level) || BLUEPRINTS[0];
+      const firstAccessible = BLUEPRINTS.find(b => b.level <= accessLevel) || BLUEPRINTS[0];
       const dbBp = await JourneyBlueprint.findOne({ where: { interview_number: firstAccessible.interview_number } });
       nextInterview = {
         interview_number: firstAccessible.interview_number,
@@ -346,6 +389,7 @@ export class JourneyService {
   async startInterviewById(studentId, interviewNumber) {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
     if (!journey) throw new Error('No journey found.');
+    const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
 
     if (journey.institution_id) {
       const institution = await Institution.findByPk(journey.institution_id);
@@ -363,7 +407,7 @@ export class JourneyService {
     const blueprint = getBlueprintByNumber(interviewNumber);
     if (!blueprint) throw new Error('Invalid interview number: ' + interviewNumber);
 
-    if (!isInterviewAccessible(interviewNumber, journey.journey_access_level)) {
+    if (!isInterviewAccessible(interviewNumber, accessLevel)) {
       throw new Error('Interview ' + interviewNumber + ' is locked. Complete previous interviews or upgrade your journey access.');
     }
 
@@ -553,7 +597,7 @@ export class JourneyService {
     const currentThreshold = currentLevelObj?.unlock_after_interviews || 0;
     const nextThreshold = nextLevelObj?.unlock_after_interviews;
 
-    const accessLevel = journey.journey_access_level || 0;
+    const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
     const maxInterviews = this._getMaxInterviewsForAccess(accessLevel);
     const remaining = Math.max(0, maxInterviews - completedCount);
     const progressPct = nextThreshold != null
@@ -569,12 +613,19 @@ export class JourneyService {
         order: [['created_at', 'DESC']],
       });
       if (sub) {
+        const norm = normalizePlanTier(sub.plan_key, sub.amount_paid, sub.access_level);
         subscription = {
-          name: sub.plan_name || sub.plan_key,
+          name: norm.name,
+          plan_name: norm.name,
+          plan_key: sub.plan_key,
           status: sub.status,
           expiryDate: sub.expires_at,
-          accessLevel: sub.access_level,
-          interviewsTotal: sub.interviews_total,
+          accessLevel: norm.level,
+          access_level: norm.level,
+          interviewsTotal: norm.interviews,
+          interviews_total: norm.interviews,
+          amount_paid: sub.amount_paid,
+          amountPaid: sub.amount_paid,
         };
       }
     } catch (_e) {}
@@ -592,14 +643,16 @@ export class JourneyService {
       const levelTotal = 10;
       const levelCompleted = Math.max(0, Math.min(10, completedCount - l.unlock_after_interviews));
       const levelInterviews = journeyInterviews.filter(iv => iv.level === l.level);
+      const isAccessible = l.level <= accessLevel;
       return {
         id: l.level,
         name: l.name,
-        status: l.level < currentLevel ? 'completed' : l.level === currentLevel ? 'current' : 'locked',
+        status: l.level < currentLevel ? 'completed' : l.level === currentLevel ? (isAccessible ? 'current' : 'locked') : 'locked',
         completedInterviews: levelCompleted,
         requiredInterviews: levelTotal,
         features: l.features,
         color: l.color,
+        accessible: isAccessible,
         interviews: levelInterviews,
       };
     });
@@ -635,8 +688,8 @@ export class JourneyService {
     }));
 
     return {
-      currentLevel,
-      currentLevelName: currentLevelObj?.name || 'Foundation',
+      currentLevel: Math.min(accessLevel || 1, currentLevel),
+      currentLevelName: LEVELS.find(l => l.level === Math.min(accessLevel || 1, currentLevel))?.name || 'Foundation',
       placementReadiness: readinessScore,
       averageScore: Math.round(avgScore * 10) / 10,
       completedInterviews: Math.max(completedCount, historyData.completed_count),
@@ -660,6 +713,7 @@ export class JourneyService {
       interviewsHistory: historyData.history,
       history: historyData.history,
       accessLevel,
+      access_level: accessLevel,
       targetCareerGoal: journey.target_career_goal || '',
       stream,
       targetRole,
@@ -667,7 +721,7 @@ export class JourneyService {
   }
 
   async _getLockStatus(studentId, journey) {
-    const accessLevel = journey?.journey_access_level || 0;
+    const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
     const completedCount = journey?.completed_interviews || 0;
     const maxInterviews = this._getMaxInterviewsForAccess(accessLevel);
     const lastInterviewAt = journey?.last_interview_at;
@@ -691,6 +745,7 @@ export class JourneyService {
   async getProgress(studentId) {
     const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
     if (!journey) return null;
+    const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
 
     const completedInterviews = await JourneyInterview.findAll({
       where: { student_id: studentId, status: 'completed' },
@@ -701,10 +756,10 @@ export class JourneyService {
 
     return {
       total_interviews: totalInterviews,
-      total_available: journey.journey_access_level > 0 ? this._getMaxInterviewsForAccess(journey.journey_access_level) : 0,
+      total_available: accessLevel > 0 ? this._getMaxInterviewsForAccess(accessLevel) : 0,
       average_score: journey.overall_score,
-      current_level: journey.current_level,
-      journey_access_level: journey.journey_access_level,
+      current_level: Math.min(accessLevel || 1, journey.current_level),
+      journey_access_level: accessLevel,
       readiness_score: journey.readiness_score,
       scores: {
         overall: journey.overall_score,
@@ -1214,7 +1269,7 @@ export class JourneyService {
       ? Object.fromEntries(METRIC_KEYS.map(k => [k, Math.round((skillTotals[k] / reportsCounted) * 10)]))
       : null;
 
-    const accessLevel = journey?.journey_access_level || 0;
+    const accessLevel = await this.getEffectiveAccessLevel(student._id, journey);
     const maxInterviews = this._getMaxInterviewsForAccess(accessLevel);
 
     return {

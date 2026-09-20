@@ -100,11 +100,12 @@ export async function getActivePlansMap() {
     if (dbPlans && dbPlans.length > 0) {
       const map = {};
       for (const p of dbPlans) {
+        const norm = normalizePlanTier(p.plan_key, p.price, p.journey_access || p.max_level);
         map[p.plan_key] = {
           key: p.plan_key,
           name: p.plan_name,
-          access_level: p.journey_access || p.max_level || 1,
-          interviews_total: p.total_interviews,
+          access_level: norm.level,
+          interviews_total: norm.interviews,
           amount: p.price,
           total_amount: p.price,
           duration_months: p.duration_months || 1,
@@ -369,7 +370,7 @@ router.post(
       order: [['created_at', 'DESC']],
     });
 
-    const currentLevel = currentSub ? currentSub.access_level : 0;
+    const currentLevel = currentSub ? normalizePlanTier(currentSub.plan_key, currentSub.amount_paid, currentSub.access_level).level : 0;
     if (targetLevel <= currentLevel) {
       throw new HttpError(400, 'Target level must be higher than current level');
     }
@@ -485,15 +486,39 @@ router.get('/current', requireAuth, requireRole('individual_student'), asyncHand
     return res.json({ subscription: null });
   }
 
+  const normalized = normalizePlanTier(subscription.plan_key, subscription.amount_paid, subscription.access_level);
+  if (subscription.access_level !== normalized.level || subscription.interviews_total !== normalized.interviews) {
+    try {
+      await subscription.update({
+        access_level: normalized.level,
+        interviews_total: normalized.interviews,
+        plan_name: normalized.name,
+      });
+    } catch (_err) {}
+  }
+
   const journey = await StudentJourney.findOne({ where: { student_id: req.user._id } });
+  if (journey) {
+    const completed = journey.completed_interviews || 0;
+    const calcLevel = completed >= 20 ? 3 : completed >= 10 ? 2 : 1;
+    if (journey.journey_access_level !== normalized.level || journey.total_interviews !== 30 || journey.current_level > 3) {
+      try {
+        await journey.update({
+          journey_access_level: normalized.level,
+          total_interviews: 30,
+          current_level: Math.min(normalized.level, calcLevel),
+        });
+      } catch (_err) {}
+    }
+  }
 
   res.json({
     subscription: {
       id: subscription._id,
       plan_key: subscription.plan_key,
-      plan_name: subscription.plan_name,
-      access_level: subscription.access_level,
-      interviews_total: subscription.interviews_total,
+      plan_name: normalized.name,
+      access_level: normalized.level,
+      interviews_total: normalized.interviews,
       status: subscription.status,
       amount_paid: subscription.amount_paid,
       start_date: subscription.start_date,
@@ -501,8 +526,9 @@ router.get('/current', requireAuth, requireRole('individual_student'), asyncHand
       created_at: subscription.created_at,
     },
     journey: journey ? {
-      current_level: journey.current_level,
+      current_level: Math.min(normalized.level, (journey.completed_interviews || 0) >= 20 ? 3 : (journey.completed_interviews || 0) >= 10 ? 2 : 1),
       completed_interviews: journey.completed_interviews,
+      total_interviews: 30,
       readiness_score: journey.readiness_score,
       status: journey.status,
     } : null,
@@ -558,6 +584,26 @@ router.get('/invoice/:transactionId', requireAuth, requireRole('individual_stude
 
 export const LEVEL_PRICES = { 1: 199, 2: 499, 3: 849 };
 
+export function normalizePlanTier(planKey, amountPaid, existingAccessLevel) {
+  const k = String(planKey || '').toLowerCase();
+  if (['placement_pro', 'professional', 'level_3', 'level_1_3'].includes(k)) {
+    return { level: 3, interviews: 30, name: 'Level 3: Placement Ready' };
+  }
+  if (['career', 'advanced', 'level_2', 'level_1_2'].includes(k)) {
+    return { level: 2, interviews: 20, name: 'Level 2: Skill Development' };
+  }
+  if (['starter', 'basic', 'level_1', 'level_1_1'].includes(k)) {
+    return { level: 1, interviews: 10, name: 'Level 1: Foundation' };
+  }
+  const amt = Number(amountPaid) || 0;
+  if (amt >= 700) return { level: 3, interviews: 30, name: 'Level 3: Placement Ready' };
+  if (amt >= 400) return { level: 2, interviews: 20, name: 'Level 2: Skill Development' };
+  if (amt >= 150) return { level: 1, interviews: 10, name: 'Level 1: Foundation' };
+  if (existingAccessLevel === 2) return { level: 2, interviews: 20, name: 'Level 2: Skill Development' };
+  if (existingAccessLevel === 3) return { level: 3, interviews: 30, name: 'Level 3: Placement Ready' };
+  return { level: 1, interviews: 10, name: 'Level 1: Foundation' };
+}
+
 export function calculateLevelUpgrade(currentLevel, targetLevel) {
   if (targetLevel <= currentLevel) return null;
   const currentPrice = LEVEL_PRICES[currentLevel] || 0;
@@ -580,8 +626,7 @@ export function calculateLevelUpgrade(currentLevel, targetLevel) {
 }
 
 router.get('/upgrade-preview', requireAuth, requireRole('individual_student'), asyncHandler(async (req, res) => {
-  const { target_level } = req.query;
-  const target = parseInt(target_level);
+  const target = parseInt(req.query.target_level || req.query.target);
   if (!target || target < 1 || target > 3) throw new HttpError(400, 'Target level must be 1-3');
 
   const currentSub = await Subscription.findOne({
@@ -589,7 +634,7 @@ router.get('/upgrade-preview', requireAuth, requireRole('individual_student'), a
     order: [['created_at', 'DESC']],
   });
 
-  const currentLevel = currentSub ? currentSub.access_level : 0;
+  const currentLevel = currentSub ? normalizePlanTier(currentSub.plan_key, currentSub.amount_paid, currentSub.access_level).level : 0;
   if (target <= currentLevel) throw new HttpError(400, 'Target level must be higher than current level');
 
   const preview = calculateLevelUpgrade(currentLevel, target);
@@ -601,8 +646,7 @@ router.post(
   requireAuth,
   requireRole("individual_student"),
   asyncHandler(async (req, res) => {
-    const { target_level } = req.body || {};
-    const target = parseInt(target_level);
+    const target = parseInt(req.body?.target_level || req.body?.target);
     if (!target || target < 1 || target > 3) throw new HttpError(400, "Target level must be 1-3");
 
     const currentSub = await Subscription.findOne({
@@ -610,7 +654,7 @@ router.post(
       order: [["created_at", "DESC"]],
     });
 
-    const currentLevel = currentSub ? currentSub.access_level : 0;
+    const currentLevel = currentSub ? normalizePlanTier(currentSub.plan_key, currentSub.amount_paid, currentSub.access_level).level : 0;
     if (target <= currentLevel) throw new HttpError(400, "Target level must be higher than current level");
 
     const preview = calculateLevelUpgrade(currentLevel, target);
@@ -659,8 +703,8 @@ router.post(
 );
 
 router.post('/upgrade-level', requireAuth, requireRole('individual_student'), asyncHandler(async (req, res) => {
-  const { target_level, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
-  const target = parseInt(target_level);
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+  const target = parseInt(req.body?.target_level || req.body?.target);
   if (!target || target < 1 || target > 3) throw new HttpError(400, 'Target level must be 1-3');
 
   const currentSub = await Subscription.findOne({
@@ -668,7 +712,7 @@ router.post('/upgrade-level', requireAuth, requireRole('individual_student'), as
     order: [['created_at', 'DESC']],
   });
 
-  const currentLevel = currentSub ? currentSub.access_level : 0;
+  const currentLevel = currentSub ? normalizePlanTier(currentSub.plan_key, currentSub.amount_paid, currentSub.access_level).level : 0;
   if (target <= currentLevel) throw new HttpError(400, 'Target level must be higher than current level');
 
   const razorpay = getRazorpayClient();

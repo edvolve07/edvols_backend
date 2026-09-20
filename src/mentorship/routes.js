@@ -108,16 +108,18 @@ router.get('/interview/next', requireAuth, asyncHandler(async (req, res) => {
     console.log('Next-interview count skipped:', err.message);
   }
 
-  const accessLevel = journey?.journey_access_level || 0;
+  const accessLevel = await journeyService.getEffectiveAccessLevel(studentId, journey);
   let accessibleTotal = 0;
   for (const level of LEVELS) {
     if (level.level <= accessLevel) {
       accessibleTotal = level.interview_range[1];
     }
   }
-  if (accessibleTotal < 1) accessibleTotal = BLUEPRINTS.length;
+  if (accessibleTotal < 1) accessibleTotal = 4;
 
-  const interviewNumber = Math.min(completedCount + 1, accessibleTotal);
+  const nextNum = completedCount + 1;
+  const isLocked = nextNum > accessibleTotal;
+  const interviewNumber = Math.min(nextNum, 30);
   const blueprint = getBlueprintByNumber(interviewNumber) || BLUEPRINTS[0];
 
   res.json({
@@ -131,6 +133,8 @@ router.get('/interview/next', requireAuth, asyncHandler(async (req, res) => {
     total_interviews: accessibleTotal,
     all_completed: false, // Attended interviews can be attended ANY times or multiple times!
     can_retake: true,
+    is_locked: isLocked,
+    access_level: accessLevel,
   });
 }));
 

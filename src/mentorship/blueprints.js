@@ -1009,3 +1009,23 @@ export function getNextLockedInterview(journeyAccessLevel) {
   }
   return null;
 }
+
+export function normalizePlanTier(planKey, amountPaid, existingAccessLevel) {
+  const k = String(planKey || '').toLowerCase();
+  if (['placement_pro', 'professional', 'level_3', 'level_1_3'].includes(k)) {
+    return { level: 3, interviews: 30, name: 'Level 3: Placement Ready' };
+  }
+  if (['career', 'advanced', 'level_2', 'level_1_2'].includes(k)) {
+    return { level: 2, interviews: 20, name: 'Level 2: Skill Development' };
+  }
+  if (['starter', 'basic', 'level_1', 'level_1_1'].includes(k)) {
+    return { level: 1, interviews: 10, name: 'Level 1: Foundation' };
+  }
+  const amt = Number(amountPaid) || 0;
+  if (amt >= 700) return { level: 3, interviews: 30, name: 'Level 3: Placement Ready' };
+  if (amt >= 400) return { level: 2, interviews: 20, name: 'Level 2: Skill Development' };
+  if (amt >= 150) return { level: 1, interviews: 10, name: 'Level 1: Foundation' };
+  if (existingAccessLevel === 2) return { level: 2, interviews: 20, name: 'Level 2: Skill Development' };
+  if (existingAccessLevel === 3) return { level: 3, interviews: 30, name: 'Level 3: Placement Ready' };
+  return { level: 1, interviews: 10, name: 'Level 1: Foundation' };
+}
