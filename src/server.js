@@ -2091,6 +2091,112 @@ async function start() {
     console.log('Referral history table migration skipped:', _err.message);
   }
 
+  try {
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS placement_configs (
+        _id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        config_name VARCHAR(100) NOT NULL DEFAULT 'default',
+        version VARCHAR(20) NOT NULL,
+        competency_weights JSONB NOT NULL DEFAULT '{}',
+        readiness_bands JSONB NOT NULL DEFAULT '{}',
+        talent_criteria JSONB NOT NULL DEFAULT '{}',
+        segmentation_thresholds JSONB NOT NULL DEFAULT '{}',
+        confidence_thresholds JSONB NOT NULL DEFAULT '{}',
+        active BOOLEAN DEFAULT false,
+        created_by VARCHAR(64),
+        notes TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_pc_name_ver ON placement_configs (config_name, version)`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_pc_active ON placement_configs (active)`);
+
+    await sequelize.query(`
+      INSERT INTO placement_configs (_id, config_name, version, competency_weights, readiness_bands, talent_criteria, segmentation_thresholds, confidence_thresholds, active, notes, created_at, updated_at)
+      SELECT
+        gen_random_uuid(),
+        'default',
+        '1.0',
+        '{"technical_knowledge":0.20,"aptitude":0.15,"communication":0.15,"problem_solving":0.15,"interview_performance":0.15,"resume_profile":0.10,"behavioral_skills":0.10}'::jsonb,
+        '{"PLACEMENT_READY":{"min":85,"max":100},"INTERVIEW_READY":{"min":75,"max":84.99},"DEVELOPMENT_REQUIRED":{"min":60,"max":74.99},"HIGH_INTERVENTION":{"min":0,"max":59.99}}'::jsonb,
+        '{"overall_readiness":80,"technical_knowledge":75,"aptitude":70,"communication":70,"problem_solving":70,"interview_performance":75,"behavioral_skills":70}'::jsonb,
+        '{"STRONG":75,"MODERATE":60,"NEEDS_IMPROVEMENT":0}'::jsonb,
+        '{"HIGH":{"minInterviews":4,"minQuestions":8},"MEDIUM":{"minInterviews":2,"minQuestions":4},"LOW":{"minInterviews":1,"minQuestions":1}}'::jsonb,
+        true,
+        'Default platform scoring configuration',
+        NOW(),
+        NOW()
+      WHERE NOT EXISTS (SELECT 1 FROM placement_configs WHERE active = true)
+    `);
+
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS scoring_versions (
+        _id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        version VARCHAR(20) UNIQUE NOT NULL,
+        name VARCHAR(200),
+        competency_weights JSONB NOT NULL DEFAULT '{}',
+        readiness_bands JSONB NOT NULL DEFAULT '{}',
+        talent_criteria JSONB NOT NULL DEFAULT '{}',
+        segmentation_thresholds JSONB NOT NULL DEFAULT '{}',
+        confidence_thresholds JSONB NOT NULL DEFAULT '{}',
+        rubric_config JSONB DEFAULT '{}',
+        activated_at TIMESTAMPTZ DEFAULT NOW(),
+        deactivated_at TIMESTAMPTZ,
+        activated_by VARCHAR(64),
+        changelog TEXT,
+        notes TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS human_validations (
+        _id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        student_id VARCHAR(64) NOT NULL,
+        session_id VARCHAR(64),
+        competency VARCHAR(50) NOT NULL,
+        ai_score FLOAT NOT NULL,
+        human_score FLOAT NOT NULL,
+        difference FLOAT NOT NULL,
+        evaluator_id VARCHAR(64) NOT NULL,
+        evaluator_name VARCHAR(255),
+        rubric_version VARCHAR(20) NOT NULL DEFAULT '1.0',
+        scoring_engine_version VARCHAR(20) NOT NULL DEFAULT '1.0',
+        notes TEXT,
+        evaluated_at TIMESTAMPTZ DEFAULT NOW(),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_hv_student ON human_validations (student_id)`);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_hv_comp ON human_validations (competency)`);
+
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS institution_contracts (
+        _id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        institution_id UUID NOT NULL,
+        plan_name VARCHAR(255) NOT NULL DEFAULT 'Institution Placement Readiness Cohort',
+        total_licensed_students INTEGER NOT NULL DEFAULT 100,
+        enrolled_students_count INTEGER DEFAULT 0,
+        per_student_price INTEGER NOT NULL DEFAULT 0,
+        contract_amount INTEGER NOT NULL DEFAULT 0,
+        currency VARCHAR(10) DEFAULT 'INR',
+        start_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        end_date TIMESTAMPTZ,
+        allowed_departments JSONB DEFAULT '["all"]',
+        allowed_batches JSONB DEFAULT '[]',
+        status VARCHAR(20) DEFAULT 'active',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    console.log('Placement tables ready');
+  } catch (_err) {
+    console.log('Placement tables migration skipped:', _err.message);
+  }
+
   const server = app.listen(config.port, "0.0.0.0", () => {
     console.log(`Server running on 0.0.0.0:${config.port}`);
   });

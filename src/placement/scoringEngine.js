@@ -73,6 +73,30 @@ function round2(val) {
   return Math.round(val * 100) / 100;
 }
 
+export function getEffectiveWeights(customWeights) {
+  const cfg = activeScoringConfig();
+  const w = customWeights || cfg?.competency_weights;
+  return (w && typeof w === 'object' && Object.keys(w).length > 0) ? w : DEFAULT_COMPETENCY_WEIGHTS;
+}
+
+export function getEffectiveBands(customBands) {
+  const cfg = activeScoringConfig();
+  const b = customBands || cfg?.readiness_bands;
+  return (b && b.PLACEMENT_READY && b.PLACEMENT_READY.min != null) ? b : DEFAULT_READINESS_BANDS;
+}
+
+export function getEffectiveTalentCriteria(customCriteria) {
+  const cfg = activeScoringConfig();
+  const c = customCriteria || cfg?.talent_criteria;
+  return (c && typeof c === 'object' && Object.keys(c).length > 0 && c.overall_readiness != null) ? c : DEFAULT_TALENT_CRITERIA;
+}
+
+export function getEffectiveSegmentation(customThresholds) {
+  const cfg = activeScoringConfig();
+  const t = customThresholds || cfg?.segmentation_thresholds;
+  return (t && typeof t === 'object' && t.STRONG != null) ? t : DEFAULT_SEGMENTATION_THRESHOLDS;
+}
+
 /**
  * Map existing interview metrics to a competency category based on question context.
  * 
@@ -84,13 +108,16 @@ function round2(val) {
  * interview context (blueprint category, focus areas, etc.)
  */
 function categorizeQuestion(blueprintCategory, focusAreas = []) {
-  const areas = (focusAreas || []).map(a => a.toLowerCase());
+  const areas = (focusAreas || []).map(a => String(a).toLowerCase());
   const cat = (blueprintCategory || '').toLowerCase();
 
   if (areas.some(a => a.includes('aptitude') || a.includes('quantitative') || a.includes('logical') || a.includes('reasoning') || a.includes('analytical'))) {
     return 'aptitude';
   }
-  if (areas.some(a => a.includes('technical') || a.includes('system') || a.includes('coding') || a.includes('algorithm') || a.includes('data structure') || a.includes('programming') || a.includes('project') || a.includes('architecture'))) {
+  if (areas.some(a => a.includes('project') || a.includes('portfolio'))) {
+    return 'project_knowledge';
+  }
+  if (areas.some(a => a.includes('technical') || a.includes('system') || a.includes('coding') || a.includes('algorithm') || a.includes('data structure') || a.includes('programming') || a.includes('architecture'))) {
     return 'technical_knowledge';
   }
   if (areas.some(a => a.includes('problem') || a.includes('design') || a.includes('decomposition') || a.includes('tradeoff'))) {
@@ -102,7 +129,7 @@ function categorizeQuestion(blueprintCategory, focusAreas = []) {
   if (areas.some(a => a.includes('communication') || a.includes('negotiation') || a.includes('articulation') || a.includes('presentation'))) {
     return 'communication';
   }
-  if (areas.some(a => a.includes('resume') || a.includes('claim') || a.includes('portfolio'))) {
+  if (areas.some(a => a.includes('resume') || a.includes('claim'))) {
     return 'resume_profile';
   }
   if (areas.some(a => a.includes('mock') || a.includes('simulation') || a.includes('interview'))) {
@@ -111,7 +138,8 @@ function categorizeQuestion(blueprintCategory, focusAreas = []) {
 
   const title = (blueprintCategory || '').toLowerCase();
   if (title.includes('aptitude') || title.includes('logical') || title.includes('reasoning')) return 'aptitude';
-  if (title.includes('technical') || title.includes('domain') || title.includes('coding') || title.includes('project')) return 'technical_knowledge';
+  if (title.includes('project') || title.includes('portfolio')) return 'project_knowledge';
+  if (title.includes('technical') || title.includes('domain') || title.includes('coding')) return 'technical_knowledge';
   if (title.includes('problem') || title.includes('design') || title.includes('system')) return 'problem_solving';
   if (title.includes('behavioral') || title.includes('cultural') || title.includes('stress') || title.includes('hr')) return 'behavioral_skills';
   if (title.includes('communication') || title.includes('negotiation')) return 'communication';
@@ -125,7 +153,8 @@ function categorizeQuestion(blueprintCategory, focusAreas = []) {
  * Normalize a 0-10 metric to 0-100.
  */
 function normalizeTo100(value, maxScale = 10) {
-  return clamp((value / maxScale) * 100, 0, 100);
+  const num = typeof value === 'number' ? value : parseFloat(value) || 0;
+  return clamp((num / maxScale) * 100, 0, 100);
 }
 
 /**
@@ -278,12 +307,12 @@ function computeCompetency(competency, interviewHistory, communicationReport, re
  */
 function computeConfidence(dataPoints, interviewHistory) {
   if (dataPoints === 0) return 'INSUFFICIENT';
-  const configured = activeScoringConfig().confidence_thresholds;
-  if (configured && Object.keys(configured).length) {
+  const configured = activeScoringConfig()?.confidence_thresholds;
+  if (configured && typeof configured === 'object' && Object.keys(configured).length) {
     const interviews = new Set(interviewHistory.map(h => h.session_id).filter(Boolean)).size;
     for (const level of ['HIGH', 'MEDIUM', 'LOW']) {
       const threshold = configured[level];
-      if (threshold && dataPoints >= threshold.minQuestions && interviews >= threshold.minInterviews) return level;
+      if (threshold && threshold.minQuestions != null && threshold.minInterviews != null && dataPoints >= threshold.minQuestions && interviews >= threshold.minInterviews) return level;
     }
     return 'LOW';
   }
@@ -308,14 +337,15 @@ function computeConfidence(dataPoints, interviewHistory) {
  * Only competencies with data contribute. Weights are renormalized
  * so missing competencies don't drag down the score artificially.
  */
-function computeOverallReadiness(competencies, weights = DEFAULT_COMPETENCY_WEIGHTS) {
+function computeOverallReadiness(competencies, weights = null) {
+  const effectiveWeights = getEffectiveWeights(weights);
   let totalWeight = 0;
   let weightedSum = 0;
   const breakdown = [];
 
   for (const comp of COMPETENCIES) {
     const data = competencies[comp];
-    const w = weights[comp] || 0;
+    const w = effectiveWeights[comp] || 0;
     if (!data || data.confidence === 'INSUFFICIENT' || data.dataPoints === 0) {
       breakdown.push({ competency: comp, weight: w, normalizedWeight: 0, score: 0, contribution: 0 });
       continue;
@@ -339,10 +369,11 @@ function computeOverallReadiness(competencies, weights = DEFAULT_COMPETENCY_WEIG
 /**
  * Classify readiness into a band based on configurable thresholds.
  */
-function classifyReadiness(score, bands = activeScoringConfig().readiness_bands || DEFAULT_READINESS_BANDS) {
-  if (score >= bands.PLACEMENT_READY.min) return 'PLACEMENT_READY';
-  if (score >= bands.INTERVIEW_READY.min) return 'INTERVIEW_READY';
-  if (score >= bands.DEVELOPMENT_REQUIRED.min) return 'DEVELOPMENT_REQUIRED';
+function classifyReadiness(score, bands = null) {
+  const effectiveBands = getEffectiveBands(bands);
+  if (score >= effectiveBands.PLACEMENT_READY.min) return 'PLACEMENT_READY';
+  if (score >= effectiveBands.INTERVIEW_READY.min) return 'INTERVIEW_READY';
+  if (score >= effectiveBands.DEVELOPMENT_REQUIRED.min) return 'DEVELOPMENT_REQUIRED';
   return 'HIGH_INTERVENTION';
 }
 
@@ -407,8 +438,8 @@ function identifyStrengths(competencies) {
 /**
  * Classify a student into segments based on competency scores.
  */
-function classifyStudentSegment(competencies) {
-  const thresholds = activeScoringConfig().segmentation_thresholds || DEFAULT_SEGMENTATION_THRESHOLDS;
+function classifyStudentSegment(competencies, thresholds = null) {
+  const effectiveThresholds = getEffectiveSegmentation(thresholds);
   const segments = [];
   const scores = {};
   for (const comp of COMPETENCIES) {
@@ -420,11 +451,11 @@ function classifyStudentSegment(competencies) {
 
   if (Object.keys(scores).length === 0) return ['UNASSESSED'];
 
-  const strong = Object.entries(scores).filter(([_, s]) => s >= thresholds.STRONG);
+  const strong = Object.entries(scores).filter(([_, s]) => s >= effectiveThresholds.STRONG);
   const moderate = Object.entries(scores).filter(([_, s]) =>
-    s >= thresholds.MODERATE && s < thresholds.STRONG
+    s >= effectiveThresholds.MODERATE && s < effectiveThresholds.STRONG
   );
-  const weak = Object.entries(scores).filter(([_, s]) => s < thresholds.MODERATE);
+  const weak = Object.entries(scores).filter(([_, s]) => s < effectiveThresholds.MODERATE);
 
   if (strong.length >= 5 && weak.length === 0) segments.push('STRONG_OVERALL');
   if (weak.length >= 3) segments.push('MULTIPLE_SKILL_GAPS');
@@ -435,19 +466,19 @@ function classifyStudentSegment(competencies) {
   const projScore = scores.project_knowledge;
   const bhScore = scores.behavioral_skills;
 
-  if (techScore != null && techScore >= thresholds.STRONG && commScore != null && commScore < thresholds.MODERATE) {
+  if (techScore != null && techScore >= effectiveThresholds.STRONG && commScore != null && commScore < effectiveThresholds.MODERATE) {
     segments.push('TECHNICAL_STRONG_COMMUNICATION_WEAK');
   }
-  if (commScore != null && commScore >= thresholds.STRONG && techScore != null && techScore < thresholds.MODERATE) {
+  if (commScore != null && commScore >= effectiveThresholds.STRONG && techScore != null && techScore < effectiveThresholds.MODERATE) {
     segments.push('COMMUNICATION_STRONG_TECHNICAL_WEAK');
   }
-  if (techScore != null && techScore >= thresholds.STRONG && psScore != null && psScore < thresholds.MODERATE) {
+  if (techScore != null && techScore >= effectiveThresholds.STRONG && psScore != null && psScore < effectiveThresholds.MODERATE) {
     segments.push('TECHNICAL_STRONG_PROBLEM_SOLVING_WEAK');
   }
-  if (projScore != null && projScore >= thresholds.STRONG && techScore != null && techScore < thresholds.MODERATE) {
+  if (projScore != null && projScore >= effectiveThresholds.STRONG && techScore != null && techScore < effectiveThresholds.MODERATE) {
     segments.push('PROJECT_STRONG_TECHNICAL_WEAK');
   }
-  if (strong.length >= 4 && bhScore != null && bhScore < thresholds.MODERATE) {
+  if (strong.length >= 4 && bhScore != null && bhScore < effectiveThresholds.MODERATE) {
     segments.push('STRONG_OVERALL_BEHAVIORAL_WEAK');
   }
 
@@ -457,9 +488,10 @@ function classifyStudentSegment(competencies) {
 /**
  * Check if student meets interview-ready/talent criteria.
  */
-function meetsTalentCriteria(competencies, overallReadiness, criteria = activeScoringConfig().talent_criteria || DEFAULT_TALENT_CRITERIA) {
-  if (overallReadiness < criteria.overall_readiness) return false;
-  for (const [comp, threshold] of Object.entries(criteria)) {
+function meetsTalentCriteria(competencies, overallReadiness, criteria = null) {
+  const effectiveCriteria = getEffectiveTalentCriteria(criteria);
+  if (overallReadiness < (effectiveCriteria.overall_readiness ?? 80)) return false;
+  for (const [comp, threshold] of Object.entries(effectiveCriteria)) {
     if (comp === 'overall_readiness') continue;
     const data = competencies[comp];
     if (!data || data.confidence === 'INSUFFICIENT' || data.dataPoints === 0) return false;
@@ -611,6 +643,7 @@ function computeBatchAnalytics(profiles) {
     studentCount: profiles.length,
     assessedCount: assessed.length,
     avgReadiness,
+    averageReadiness: avgReadiness,
     distribution,
     competencyAverages,
     skillGaps: gapList,
@@ -652,12 +685,15 @@ function computeDepartmentAnalytics(profiles, departments) {
 function filterStudentsByCriteria(profiles, criteria) {
   return profiles.filter(profile => {
     const readiness = profile.overallReadiness || profile.overall_placement_score || 0;
-    if (readiness < (criteria.minReadiness || 0)) return false;
+    const minReadiness = criteria.minReadiness ?? criteria.overall_readiness ?? 0;
+    if (readiness < minReadiness) return false;
 
-    for (const [comp, threshold] of Object.entries(criteria.competencies || {})) {
+    const comps = criteria.competencies || criteria;
+    for (const [comp, threshold] of Object.entries(comps)) {
+      if (['minReadiness', 'overall_readiness', 'competencies'].includes(comp)) continue;
       const data = profile.competencies?.[comp];
-      if (!data || data.confidence === 'INSUFFICIENT' || data.dataPoints === 0) return false;
-      if (data.score < threshold) return false;
+      const score = typeof data === 'number' ? data : (data?.score ?? 0);
+      if (score < threshold) return false;
     }
     return true;
   });

@@ -231,12 +231,12 @@ console.log('\n=== Test 5: Overall Readiness Calculation ===');
 
 const allCompetencies = {
   technical_knowledge: { score: 80, confidence: 'HIGH', dataPoints: 5 },
-  problem_solving: { score: 75, confidence: 'HIGH', dataPoints: 4 },
+  aptitude: { score: 85, confidence: 'HIGH', dataPoints: 4 },
   communication: { score: 70, confidence: 'MEDIUM', dataPoints: 3 },
-  project_knowledge: { score: 85, confidence: 'HIGH', dataPoints: 4 },
-  behavioral_skills: { score: 65, confidence: 'MEDIUM', dataPoints: 2 },
-  resume_profile: { score: 90, confidence: 'LOW', dataPoints: 1 },
+  problem_solving: { score: 75, confidence: 'HIGH', dataPoints: 4 },
   interview_performance: { score: 72, confidence: 'HIGH', dataPoints: 6 },
+  resume_profile: { score: 90, confidence: 'LOW', dataPoints: 1 },
+  behavioral_skills: { score: 65, confidence: 'MEDIUM', dataPoints: 2 },
 };
 
 const overallResult = computeOverallReadiness(allCompetencies);
@@ -244,9 +244,9 @@ assert(overallResult.overall > 0 && overallResult.overall <= 100, `Overall score
 assert(overallResult.breakdown.length === 7, 'Breakdown has 7 entries');
 
 // Manual verification:
-// 80*0.25 + 75*0.20 + 70*0.15 + 85*0.15 + 65*0.10 + 90*0.10 + 72*0.05
-// = 20 + 15 + 10.5 + 12.75 + 6.5 + 9 + 3.6 = 77.35
-assertClose(overallResult.overall, 77.35, 0.1, `Overall ≈ 77.35: ${overallResult.overall}`);
+// 80*0.20 + 85*0.15 + 70*0.15 + 75*0.15 + 72*0.15 + 90*0.10 + 65*0.10
+// = 16 + 12.75 + 10.5 + 11.25 + 10.8 + 9 + 6.5 = 76.8
+assertClose(overallResult.overall, 76.8, 0.1, `Overall ≈ 76.8: ${overallResult.overall}`);
 
 // ═══════════════════════════════════════════════════════
 // TEST 6: Classification Boundaries
@@ -349,9 +349,9 @@ console.log('\n=== Test 11: Talent Criteria Matching ===');
 
 const talentComps = {
   technical_knowledge: { score: 85, confidence: 'HIGH', dataPoints: 5 },
+  aptitude: { score: 80, confidence: 'HIGH', dataPoints: 4 },
   problem_solving: { score: 80, confidence: 'HIGH', dataPoints: 4 },
   communication: { score: 75, confidence: 'MEDIUM', dataPoints: 3 },
-  project_knowledge: { score: 80, confidence: 'HIGH', dataPoints: 4 },
   behavioral_skills: { score: 70, confidence: 'MEDIUM', dataPoints: 2 },
   resume_profile: { score: 90, confidence: 'LOW', dataPoints: 1 },
   interview_performance: { score: 78, confidence: 'HIGH', dataPoints: 6 },
@@ -369,13 +369,14 @@ assert(!meetsTalentCriteria(weakComps, 55), 'Weak student does not meet talent c
 // ═══════════════════════════════════════════════════════
 console.log('\n=== Test 12: Recommendations ===');
 
-const recGaps = [
-  { competency: 'communication', score: 30, targetScore: 70, gap: 40, priority: 'HIGH' },
-  { competency: 'problem_solving', score: 55, targetScore: 70, gap: 15, priority: 'MODERATE' },
-];
-const recs = generateRecommendations({}, recGaps);
-assert(recs.length === 2, `Generated ${recs.length} recommendations`);
-// Recommendations sorted by priority (HIGH first), so Communication comes first
+const recCompetencies = {
+  technical_knowledge: { score: 80, confidence: 'HIGH', dataPoints: 5 },
+  communication: { score: 40, confidence: 'HIGH', dataPoints: 4 },
+  problem_solving: { score: 55, confidence: 'MEDIUM', dataPoints: 3 },
+};
+const recGaps = identifySkillGaps(recCompetencies);
+const recs = generateRecommendations(recCompetencies, recGaps);
+assertEqual(recs.length, 2, 'Generated 2 recommendations');
 assertEqual(recs[0].area, 'Communication', 'First recommendation is Communication');
 assertEqual(recs[0].priority, 'HIGH', 'First recommendation is HIGH priority');
 
@@ -384,37 +385,24 @@ assertEqual(recs[0].priority, 'HIGH', 'First recommendation is HIGH priority');
 // ═══════════════════════════════════════════════════════
 console.log('\n=== Test 13: Company-Specific Filtering ===');
 
-const filterProfiles = [
-  {
-    overallReadiness: 85,
-    competencies: {
-      technical_knowledge: { score: 82, confidence: 'HIGH', dataPoints: 5 },
-      communication: { score: 75, confidence: 'MEDIUM', dataPoints: 3 },
-    },
-  },
-  {
-    overallReadiness: 70,
-    competencies: {
-      technical_knowledge: { score: 60, confidence: 'HIGH', dataPoints: 5 },
-      communication: { score: 80, confidence: 'MEDIUM', dataPoints: 3 },
-    },
-  },
-  {
-    overallReadiness: 90,
-    competencies: {
-      technical_knowledge: { score: 88, confidence: 'HIGH', dataPoints: 5 },
-      communication: { score: 85, confidence: 'HIGH', dataPoints: 4 },
-    },
-  },
+const students = [
+  { studentId: 's1', overallReadiness: 85, competencies: { technical_knowledge: { score: 80 }, communication: { score: 75 }, problem_solving: { score: 80 } } },
+  { studentId: 's2', overallReadiness: 72, competencies: { technical_knowledge: { score: 75 }, communication: { score: 65 }, problem_solving: { score: 70 } } },
+  { studentId: 's3', overallReadiness: 55, competencies: { technical_knowledge: { score: 50 }, communication: { score: 40 }, problem_solving: { score: 50 } } },
 ];
 
-const criteria = { minReadiness: 80, competencies: { technical_knowledge: 75, communication: 70 } };
-const filtered = filterStudentsByCriteria(filterProfiles, criteria);
-assertEqual(filtered.length, 2, '2 students match criteria');
+const standardFilter = filterStudentsByCriteria(students, {
+  overall_readiness: 70,
+  technical_knowledge: 70,
+});
+assertEqual(standardFilter.length, 2, '2 students match criteria');
 
-const strictCriteria = { minReadiness: 85, competencies: { technical_knowledge: 85, communication: 80 } };
-const strictFiltered = filterStudentsByCriteria(filterProfiles, strictCriteria);
-assertEqual(strictFiltered.length, 1, '1 student matches strict criteria');
+const strictFilter = filterStudentsByCriteria(students, {
+  overall_readiness: 80,
+  technical_knowledge: 80,
+  communication: 70,
+});
+assertEqual(strictFilter.length, 1, '1 student matches strict criteria');
 
 // ═══════════════════════════════════════════════════════
 // TEST 14: Batch Analytics
@@ -422,20 +410,19 @@ assertEqual(strictFiltered.length, 1, '1 student matches strict criteria');
 console.log('\n=== Test 14: Batch Analytics ===');
 
 const batchProfiles = [
-  { readiness_band: 'PLACEMENT_READY', overall_placement_score: 88, competencies: { technical_knowledge: { score: 85, confidence: 'HIGH', dataPoints: 5 }, communication: { score: 80, confidence: 'HIGH', dataPoints: 4 } } },
-  { readiness_band: 'INTERVIEW_READY', overall_placement_score: 78, competencies: { technical_knowledge: { score: 75, confidence: 'HIGH', dataPoints: 4 }, communication: { score: 70, confidence: 'MEDIUM', dataPoints: 3 } } },
-  { readiness_band: 'DEVELOPMENT_REQUIRED', overall_placement_score: 65, competencies: { technical_knowledge: { score: 60, confidence: 'MEDIUM', dataPoints: 3 }, communication: { score: 55, confidence: 'LOW', dataPoints: 2 } } },
+  { studentId: 's1', overallReadiness: 88, readinessBand: 'PLACEMENT_READY', competencies: { technical_knowledge: { score: 85 } } },
+  { studentId: 's2', overallReadiness: 78, readinessBand: 'INTERVIEW_READY', competencies: { technical_knowledge: { score: 75 } } },
+  { studentId: 's3', overallReadiness: 65, readinessBand: 'DEVELOPMENT_REQUIRED', competencies: { technical_knowledge: { score: 60 } } },
 ];
 
-const batch = computeBatchAnalytics(batchProfiles);
-assertEqual(batch.studentCount, 3, 'Batch student count = 3');
-assertEqual(batch.assessedCount, 3, 'Batch assessed count = 3');
-assert(batch.avgReadiness > 0, `Batch avg readiness > 0: ${batch.avgReadiness}`);
-assertEqual(batch.distribution.PLACEMENT_READY, 1, '1 placement ready');
-assertEqual(batch.distribution.INTERVIEW_READY, 1, '1 interview ready');
-assertEqual(batch.distribution.DEVELOPMENT_REQUIRED, 1, '1 development required');
+const analytics = computeBatchAnalytics(batchProfiles);
+assertEqual(analytics.studentCount, 3, 'Batch student count = 3');
+assertEqual(analytics.assessedCount, 3, 'Batch assessed count = 3');
+assert(analytics.averageReadiness > 0, `Batch avg readiness > 0: ${analytics.averageReadiness}`);
+assertEqual(analytics.distribution.PLACEMENT_READY, 1, '1 placement ready');
+assertEqual(analytics.distribution.INTERVIEW_READY, 1, '1 interview ready');
+assertEqual(analytics.distribution.DEVELOPMENT_REQUIRED, 1, '1 development required');
 
-// Empty batch
 const emptyBatch = computeBatchAnalytics([]);
 assertEqual(emptyBatch.studentCount, 0, 'Empty batch → 0 students');
 
@@ -465,7 +452,7 @@ console.log('\n=== Test 16: Score Boundary Reproducibility ===');
 // Verify that the same inputs always produce the same outputs
 for (let run = 0; run < 3; run++) {
   const result = computeOverallReadiness(allCompetencies);
-  assertClose(result.overall, 77.35, 0.01, `Run ${run + 1}: Overall is deterministic ≈ 77.35`);
+  assertClose(result.overall, 76.8, 0.01, `Run ${run + 1}: Overall is deterministic ≈ 76.8`);
 }
 
 // ═══════════════════════════════════════════════════════

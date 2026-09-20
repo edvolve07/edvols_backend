@@ -102,16 +102,22 @@ async function fetchBulkStudentData(studentIds) {
 function buildInterviewHistory(sessions) {
   const interviewHistory = [];
   for (const session of sessions) {
-    const history = session.history || [];
+    let history = session.history || [];
+    if (typeof history === 'string') {
+      try { history = JSON.parse(history); } catch (_) { history = []; }
+    }
+    if (!Array.isArray(history)) history = [];
+
     const blueprint = session.interview_number ? getBlueprintByNumber(session.interview_number) : null;
     const category = blueprint
       ? categorizeQuestion(blueprint.category, blueprint.focus_areas)
-      : 'technical_knowledge';
+      : categorizeQuestion(session.domain || session.role || 'Technical', []);
 
     for (const entry of history) {
+      if (!entry || typeof entry !== 'object') continue;
       interviewHistory.push({
         ...entry,
-        category,
+        category: entry.category || category,
         session_id: session.session_id,
         interview_number: session.interview_number,
         timestamp: entry.timestamp || session.created_at,

@@ -14,6 +14,7 @@ import {
   DEFAULT_COMPETENCY_WEIGHTS,
   DEFAULT_READINESS_BANDS,
   DEFAULT_TALENT_CRITERIA,
+  getEffectiveWeights,
   categorizeQuestion,
   computeCompetency,
   computeOverallReadiness,
@@ -54,8 +55,13 @@ router.use(requireAuth, (req, _res, next) => {
   next();
 });
 router.use(asyncHandler(async (_req, _res, next) => {
-  const config = await PlacementConfig.findOne({ where: { active: true } });
-  scoringContext.run(config?.get({ plain: true }) || {}, next);
+  try {
+    const config = await PlacementConfig.findOne({ where: { active: true } });
+    scoringContext.run(config?.get({ plain: true }) || {}, next);
+  } catch (err) {
+    console.warn('PlacementConfig lookup skipped/failed:', err?.message);
+    scoringContext.run({}, next);
+  }
 }));
 
 // ═══════════════════════════════════════════════════════
@@ -66,42 +72,56 @@ async function gatherStudentData(studentId) {
     return {
       interviewHistory: [],
       interviewSessions: [],
+      interviewReports: [],
       communicationReport: null,
       resumeAnalysis: null,
       journey: null,
       completedInterviews: 0,
     };
   }
-  const [interviewSessions, latestCommReport, latestResume, journey] = await Promise.all([
+  const [interviewSessions, latestCommReport, latestResume, journey, interviewReports] = await Promise.all([
     InterviewSession.findAll({
       where: { student_id: studentId, status: { [Op.in]: ['completed', 'ended'] } },
       order: [['created_at', 'ASC']],
-    }),
+    }).catch(err => { console.warn('InterviewSession lookup failed:', err.message); return []; }),
     CommunicationReport.findOne({
       where: { student_id: studentId },
       order: [['created_at', 'DESC']],
-    }),
+    }).catch(err => { console.warn('CommunicationReport lookup failed:', err.message); return null; }),
     ResumeVersion.findOne({
       where: { student_id: studentId },
       order: [['created_at', 'DESC']],
-    }),
+    }).catch(err => { console.warn('ResumeVersion lookup failed:', err.message); return null; }),
     StudentJourney.findOne({
       where: { student_id: studentId },
-    }),
+    }).catch(err => { console.warn('StudentJourney lookup failed:', err.message); return null; }),
+    InterviewReport.findAll({
+      where: { student_id: studentId },
+      order: [['created_at', 'ASC']],
+    }).catch(err => { console.warn('InterviewReport lookup failed:', err.message); return []; }),
   ]);
 
   const interviewHistory = [];
+  const processedSessions = new Set();
+
   for (const session of interviewSessions) {
-    const history = session.history || [];
+    if (session.session_id) processedSessions.add(session.session_id);
+    let history = session.history || [];
+    if (typeof history === 'string') {
+      try { history = JSON.parse(history); } catch (_) { history = []; }
+    }
+    if (!Array.isArray(history)) history = [];
+
     const blueprint = session.interview_number ? getBlueprintByNumber(session.interview_number) : null;
     const category = blueprint
       ? categorizeQuestion(blueprint.category, blueprint.focus_areas)
-      : 'technical_knowledge';
+      : categorizeQuestion(session.domain || session.role || 'Technical', []);
 
     for (const entry of history) {
+      if (!entry || typeof entry !== 'object') continue;
       interviewHistory.push({
         ...entry,
-        category,
+        category: entry.category || category,
         session_id: session.session_id,
         interview_number: session.interview_number,
         timestamp: entry.timestamp || session.created_at,
@@ -109,20 +129,53 @@ async function gatherStudentData(studentId) {
     }
   }
 
+  // Also include questions from InterviewReports if session history was empty or absent
+  for (const report of interviewReports) {
+    if (!report) continue;
+    let breakdown = report.question_breakdown || [];
+    if (typeof breakdown === 'string') {
+      try { breakdown = JSON.parse(breakdown); } catch (_) { breakdown = []; }
+    }
+    if (!Array.isArray(breakdown)) breakdown = [];
+
+    const sessionHistoryCount = interviewHistory.filter(h => h.session_id === report.session_id).length;
+    if (sessionHistoryCount === 0 && breakdown.length > 0) {
+      for (const item of breakdown) {
+        if (!item || typeof item !== 'object') continue;
+        interviewHistory.push({
+          question: item.question || '',
+          answer: item.answer || '',
+          evaluation: item.evaluation || item.metrics || report.overall?.metrics || {},
+          category: item.category || categorizeQuestion(report.interview_domain || report.interview_role || 'General', []),
+          session_id: report.session_id,
+          timestamp: report.created_at,
+        });
+      }
+    }
+  }
+
+  const completedCount = Math.max(
+    interviewSessions.length,
+    interviewReports.length,
+    journey?.completed_interviews || 0
+  );
+
   return {
     interviewHistory,
     interviewSessions,
+    interviewReports,
     communicationReport: latestCommReport?.overall || null,
     resumeAnalysis: latestResume?.ats_analysis || null,
     journey,
-    completedInterviews: interviewSessions.length,
+    completedInterviews: completedCount,
   };
 }
 
 // ═══════════════════════════════════════════════════════
 // HELPER: Compute full placement profile (single student)
 // ═══════════════════════════════════════════════════════
-function computeStudentProfile(studentData, weights = activeScoringConfig().competency_weights || DEFAULT_COMPETENCY_WEIGHTS) {
+function computeStudentProfile(studentData, weights = null) {
+  const effectiveWeights = getEffectiveWeights(weights);
   const { interviewHistory, communicationReport, resumeAnalysis, completedInterviews } = studentData;
 
   const competencies = {};
@@ -130,7 +183,7 @@ function computeStudentProfile(studentData, weights = activeScoringConfig().comp
     competencies[comp] = computeCompetency(comp, interviewHistory, communicationReport, resumeAnalysis);
   }
 
-  const overallResult = computeOverallReadiness(competencies, weights);
+  const overallResult = computeOverallReadiness(competencies, effectiveWeights);
   const readinessBand = overallResult.totalWeight > 0 ? classifyReadiness(overallResult.overall) : 'UNASSESSED';
   const assessmentConfidence = computeAssessmentConfidence(competencies);
   const gaps = identifySkillGaps(competencies);
@@ -160,28 +213,57 @@ function computeStudentProfile(studentData, weights = activeScoringConfig().comp
 // ═══════════════════════════════════════════════════════
 
 router.get('/student/profile', requireAuth, asyncHandler(async (req, res) => {
-  const studentId = req.user?._id || req.user?.user_id;
+  const studentId = req.user?._id || req.user?.user_id || req.user?.id;
   if (!studentId) throw new HttpError(401, 'Not authenticated');
 
-  const cached = profileCache.get(profileKey(studentId));
-  let profile;
-  if (cached) {
-    profile = cached;
-  } else {
-    const studentData = await gatherStudentData(studentId);
+  const [student, studentData] = await Promise.all([
+    User.findByPk(studentId).catch(() => null),
+    gatherStudentData(studentId),
+  ]);
+
+  let profile = profileCache.get(profileKey(studentId));
+  if (!profile) {
     profile = computeStudentProfile(studentData);
     profileCache.set(profileKey(studentId), profile);
   }
 
+  const reports = studentData.interviewReports && studentData.interviewReports.length > 0
+    ? studentData.interviewReports
+    : await InterviewReport.findAll({
+        where: { student_id: studentId },
+        order: [['created_at', 'ASC']],
+        attributes: ['session_id', 'overall', 'strengths', 'areas_to_improve', 'created_at'],
+      }).catch(() => []);
+
+  const interviewHistoryFormatted = reports.map((r, idx) => ({
+    sessionId: r.session_id,
+    interviewNumber: idx + 1,
+    percentage: r.overall?.percentage || 0,
+    grade: r.overall?.grade || 'N/A',
+    strengths: r.strengths || [],
+    areasToImprove: r.areas_to_improve || [],
+    date: r.created_at,
+  }));
+
   res.json({
     studentId,
+    student: {
+      id: student?._id || studentId,
+      name: student?.name || req.user?.name || 'Student',
+      email: student?.email || req.user?.email || '',
+      departmentId: student?.department_id || req.user?.department_id || null,
+      year: student?.year || req.user?.year || null,
+      stream: student?.stream || req.user?.stream || null,
+      institutionId: student?.institutionId || req.user?.institutionId || null,
+    },
     ...profile,
+    interviewHistory: interviewHistoryFormatted,
     scoringEngineVersion: activeScoringConfig().version || '1.0',
   });
 }));
 
 router.get('/student/explain', requireAuth, asyncHandler(async (req, res) => {
-  const studentId = req.user?._id || req.user?.user_id;
+  const studentId = req.user?._id || req.user?.user_id || req.user?.id;
   if (!studentId) throw new HttpError(401, 'Not authenticated');
 
   const cached = profileCache.get(profileKey(studentId));
@@ -208,7 +290,7 @@ router.get('/student/explain', requireAuth, asyncHandler(async (req, res) => {
 }));
 
 router.get('/student/gaps', requireAuth, asyncHandler(async (req, res) => {
-  const studentId = req.user?._id || req.user?.user_id;
+  const studentId = req.user?._id || req.user?.user_id || req.user?.id;
   if (!studentId) throw new HttpError(401, 'Not authenticated');
 
   const cached = profileCache.get(profileKey(studentId));
@@ -722,7 +804,12 @@ router.get('/cache-stats', requireAuth, requireRole('admin', 'master_admin'), as
 
 // GET /api/placement/config — get active config
 router.get('/config', requireAuth, requireRole('admin', 'master_admin'), asyncHandler(async (req, res) => {
-  const activeConfig = await PlacementConfig.findOne({ where: { active: true } });
+  let activeConfig = null;
+  try {
+    activeConfig = await PlacementConfig.findOne({ where: { active: true } });
+  } catch (err) {
+    console.warn('PlacementConfig lookup failed in /config:', err?.message);
+  }
 
   if (activeConfig) {
     return res.json({
