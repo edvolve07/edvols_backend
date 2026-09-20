@@ -354,13 +354,12 @@ router.post(
   requireAuth,
   requireRole('individual_student'),
   asyncHandler(async (req, res) => {
-    const { plan_key, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+    const { plan_key, target_level, razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
 
-    if (!plan_key || !plan_key.startsWith('level_upgrade_')) {
-      throw new HttpError(400, 'Invalid upgrade plan key');
+    let targetLevel = parseInt(target_level || req.body?.target, 10);
+    if (!targetLevel && plan_key && plan_key.startsWith('level_upgrade_')) {
+      targetLevel = parseInt(plan_key.replace('level_upgrade_', ''), 10);
     }
-
-    const targetLevel = parseInt(plan_key.replace('level_upgrade_', ''), 10);
     if (!targetLevel || targetLevel < 1 || targetLevel > 3) {
       throw new HttpError(400, 'Invalid target level (must be 1-3)');
     }
@@ -646,7 +645,12 @@ router.post(
   requireAuth,
   requireRole("individual_student"),
   asyncHandler(async (req, res) => {
-    const target = parseInt(req.body?.target_level || req.body?.target);
+    const target = parseInt(
+      req.body?.target_level ||
+      req.body?.target ||
+      (req.body?.plan_key?.startsWith('level_upgrade_') ? req.body.plan_key.replace('level_upgrade_', '') : null),
+      10
+    );
     if (!target || target < 1 || target > 3) throw new HttpError(400, "Target level must be 1-3");
 
     const currentSub = await Subscription.findOne({
@@ -704,7 +708,12 @@ router.post(
 
 router.post('/upgrade-level', requireAuth, requireRole('individual_student'), asyncHandler(async (req, res) => {
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
-  const target = parseInt(req.body?.target_level || req.body?.target);
+  const target = parseInt(
+    req.body?.target_level ||
+    req.body?.target ||
+    (req.body?.plan_key?.startsWith('level_upgrade_') ? req.body.plan_key.replace('level_upgrade_', '') : null),
+    10
+  );
   if (!target || target < 1 || target > 3) throw new HttpError(400, 'Target level must be 1-3');
 
   const currentSub = await Subscription.findOne({
