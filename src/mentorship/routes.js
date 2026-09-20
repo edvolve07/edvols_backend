@@ -609,9 +609,10 @@ router.get('/admin/subscription-impact', requireAuth, requireRole('admin', 'mast
 }));
 
 router.post('/admin/subscriptions/institution/:institutionId', requireAuth, requireRole('admin', 'master_admin'), asyncHandler(async (req, res) => {
-  const { plan_key } = req.body || {};
-  const result = await journeyService.assignInstitutionSubscription(req.params.institutionId, plan_key);
-  res.json(result);
+  const { plan_key, department_id, year } = req.body || {};
+  if (!plan_key) throw new HttpError(400, 'plan_key is required');
+  const result = await journeyService.assignInstitutionSubscription(req.params.institutionId, plan_key, { department_id, year });
+  res.json({ results: result });
 }));
 
 router.get('/admin/student-users/:studentId', requireAuth, requireRole('admin', 'master_admin'), asyncHandler(async (req, res) => {

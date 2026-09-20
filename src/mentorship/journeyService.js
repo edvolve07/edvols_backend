@@ -772,7 +772,7 @@ export class JourneyService {
     if (access >= 3) return 30;
     if (access === 2) return 20;
     if (access === 1) return 10;
-    return 4;
+    return 0;
   }
 
   async getTrends(studentId) {
@@ -1083,16 +1083,72 @@ export class JourneyService {
         student_email: student.email || '',
         institution_id: student.institutionId || null,
         journey_access_level: accessLevel,
-        current_level: accessLevel > 0 ? 1 : 0,
+        total_interviews: 30,
+        current_level: accessLevel > 0 ? 1 : 1,
+        current_interview_number: 1,
+        completed_interviews: 0,
         status: accessLevel > 0 ? 'not_started' : 'locked',
       });
     } else {
-      const oldLevel = journey.journey_access_level;
       await journey.update({
         journey_access_level: accessLevel,
-        current_level: accessLevel > 0 ? Math.max(journey.current_level, 1) : 0,
-        status: accessLevel > 0 ? (journey.status === 'not_started' ? 'not_started' : journey.status) : 'locked',
+        total_interviews: 30,
+        current_level: accessLevel > 0 ? Math.max(journey.current_level, 1) : 1,
+        status: accessLevel > 0 ? (journey.status === 'locked' ? 'not_started' : journey.status) : 'locked',
       });
+    }
+
+    // Synchronize active subscription for the student
+    try {
+      if (accessLevel > 0) {
+        const planKey = accessLevel === 3 ? 'placement_pro' : accessLevel === 2 ? 'career' : 'starter';
+        const planName = accessLevel === 3 ? 'Placement Pro' : accessLevel === 2 ? 'Career' : 'Starter';
+        const maxInterviews = accessLevel === 3 ? 30 : accessLevel === 2 ? 20 : 10;
+        let negotiatedPrice = null;
+        const studentUser = await User.findByPk(studentId);
+        if (studentUser?.institutionId) {
+          const inst = await Institution.findByPk(studentUser.institutionId);
+          const pKey = accessLevel === 3 ? 'professional_price' : accessLevel === 2 ? 'advanced_price' : 'basic_price';
+          negotiatedPrice = inst?.[pKey] ?? null;
+        }
+
+        const existingSub = await Subscription.findOne({
+          where: { student_id: studentId, status: 'active' },
+          order: [['created_at', 'DESC']],
+        });
+        if (existingSub) {
+          await existingSub.update({
+            access_level: accessLevel,
+            interviews_total: maxInterviews,
+            plan_key: planKey,
+            plan_name: planName,
+            ...(negotiatedPrice != null && (!existingSub.amount_paid || existingSub.amount_paid === 0) ? { amount_paid: negotiatedPrice } : {}),
+          });
+        } else {
+          await Subscription.create({
+            student_id: studentId,
+            plan_key: planKey,
+            plan_name: planName,
+            plan_id: null,
+            access_level: accessLevel,
+            interviews_total: maxInterviews,
+            status: 'active',
+            amount_paid: negotiatedPrice ?? 0,
+            currency: 'INR',
+            gst_amount: 0,
+            start_date: new Date(),
+            end_date: null,
+            invoices: [],
+          });
+        }
+      } else {
+        await Subscription.update(
+          { status: 'cancelled' },
+          { where: { student_id: studentId, status: 'active' } }
+        );
+      }
+    } catch (_subSyncErr) {
+      console.log('Subscription sync on assignJourneyAccess skipped:', _subSyncErr.message);
     }
 
     return { success: true, student_id: studentId, access_level: accessLevel };
@@ -1181,10 +1237,26 @@ export class JourneyService {
       journeyMap.set(j.student_id, j);
     }
 
+    let subscriptions = [];
+    try {
+      subscriptions = await Subscription.findAll({
+        where: { status: 'active' },
+        order: [['created_at', 'DESC']],
+        raw: true,
+      });
+    } catch (_e) {}
+    const subMap = new Map();
+    for (const sub of subscriptions) {
+      if (!subMap.has(sub.student_id)) subMap.set(sub.student_id, sub);
+    }
+
     let filtered = allStudents.map(s => {
       const j = journeyMap.get(s._id);
-      const accessLevel = j?.journey_access_level || 0;
-      const maxInterviews = this._getMaxInterviewsForAccess(accessLevel);
+      const sub = subMap.get(s._id);
+      const accessLevel = Math.max(j?.journey_access_level || 0, sub?.access_level || 0);
+      const maxInterviews = sub?.interviews_total || this._getMaxInterviewsForAccess(accessLevel);
+      const planName = sub?.plan_name || (accessLevel > 0 ? (LEVELS.find(l => l.level === accessLevel)?.name || `Level ${accessLevel}`) : '—');
+      const planKey = sub?.plan_key || (accessLevel > 0 ? `level_${accessLevel}` : null);
       return {
         id: s._id,
         name: s.name,
@@ -1192,19 +1264,20 @@ export class JourneyService {
         institution_id: s.institutionId || null,
         journey: j ? {
           _id: j._id,
+          journey_access_level: accessLevel,
           current_level: j.current_level,
           readiness_score: j.readiness_score,
           completed_interviews: j.completed_interviews,
           status: j.status,
         } : null,
-        subscription: {
-          plan_key: accessLevel > 0 ? `level_${accessLevel}` : null,
-          plan_name: accessLevel > 0 ? LEVELS.find(l => l.level === accessLevel)?.name || 'Unknown' : '—',
-          status: accessLevel > 0 ? 'active' : 'none',
+        subscription: accessLevel > 0 ? {
+          plan_key: planKey,
+          plan_name: planName,
+          status: 'active',
           interviews_used: j?.completed_interviews || 0,
           interviews_total: maxInterviews,
           level_access: accessLevel,
-        },
+        } : null,
       };
     });
 
@@ -1324,37 +1397,85 @@ export class JourneyService {
   }
 
   async getAdminPlans() {
-    const PLAN_DETAILS = {
-      starter: { name: 'Starter', price: 199, interviews: 10, access_level: 1 },
-      career: { name: 'Career', price: 499, interviews: 20, access_level: 2 },
-      placement_pro: { name: 'Placement Pro', price: 849, interviews: 30, access_level: 3 },
-      basic: { name: 'Starter', price: 199, interviews: 10, access_level: 1 },
-      advanced: { name: 'Career', price: 499, interviews: 20, access_level: 2 },
-      professional: { name: 'Placement Pro', price: 849, interviews: 30, access_level: 3 },
-    };
-    let paidPlans = [];
+    const CANONICAL_PLANS = [
+      {
+        key: 'starter',
+        name: 'Starter',
+        level_access: 1,
+        access_level: 1,
+        interviews_total: 10,
+        interviews: 10,
+        price: 199,
+        features: [
+          'Foundation Journey Access (Interviews 1–10)',
+          '10 AI Interviews',
+          'Aptitude Fundamentals',
+          'Technical Assessment',
+          'Communication Assessment',
+          'Resume ATS Analysis',
+        ],
+      },
+      {
+        key: 'career',
+        name: 'Career',
+        level_access: 2,
+        access_level: 2,
+        interviews_total: 20,
+        interviews: 20,
+        price: 499,
+        features: [
+          'Skill Development Access (Interviews 1–20)',
+          'All Level 1 & Level 2 Features',
+          '20 AI Interviews',
+          'Role-Based Practice',
+          'Behavioral & STAR Method',
+          'Progress Analytics',
+        ],
+      },
+      {
+        key: 'placement_pro',
+        name: 'Placement Pro',
+        level_access: 3,
+        access_level: 3,
+        interviews_total: 30,
+        interviews: 30,
+        price: 849,
+        features: [
+          'Full Placement Ready Access (Interviews 1–30)',
+          'All 30 AI Interviews Across All 3 Levels',
+          'Company-Style Mock Interviews',
+          'Final Placement Assessment',
+          'Verified Placement Certificate',
+          'Priority Support',
+        ],
+      },
+    ];
+
+    let dbPlans = [];
     try {
-      paidPlans = await Plan.findAll({ where: { status: 'active' }, order: [['price', 'ASC']], raw: true });
+      dbPlans = await Plan.findAll({ where: { status: 'active' }, order: [['price', 'ASC']], raw: true });
     } catch (_e) {
-      paidPlans = [];
+      dbPlans = [];
     }
-    const subscriptionPlans = paidPlans.length
-      ? paidPlans.map((p) => ({
-          key: p.plan_key,
-          name: p.plan_name,
-          price: Number(p.price) || 0,
-          access_level: Number(p.journey_access) || 0,
-          interviews_total: Number(p.total_interviews) || 0,
-          features: p.features || [],
-        }))
-      : Object.values(PLAN_DETAILS).map((p) => ({
-          key: p.name.toLowerCase(),
-          name: p.name,
-          price: p.price,
-          access_level: p.access_level,
-          interviews_total: p.interviews,
-          features: [],
-        }));
+
+    const subscriptionPlans = CANONICAL_PLANS.map((canon) => {
+      const dbMatch = dbPlans.find(
+        (p) =>
+          p.plan_key === canon.key ||
+          (canon.key === 'starter' && p.plan_key === 'basic') ||
+          (canon.key === 'career' && p.plan_key === 'advanced') ||
+          (canon.key === 'placement_pro' && p.plan_key === 'professional')
+      );
+      return {
+        key: canon.key,
+        name: dbMatch?.plan_name || canon.name,
+        price: dbMatch ? Number(dbMatch.price) : canon.price,
+        access_level: canon.access_level,
+        interviews_total: canon.interviews_total,
+        features: dbMatch?.features?.length ? dbMatch.features : canon.features,
+      };
+    });
+
     return {
       plans: LEVELS.map(lvl => ({
         key: `level_${lvl.level}`,
@@ -1372,7 +1493,23 @@ export class JourneyService {
   async assignSubscription(studentId, planKey) {
     const level = this._levelFromPlanKey(planKey);
     await this.assignJourneyAccess(studentId, level, 'admin');
-    const planInfo = await Plan.findOne({ where: { plan_key: planKey } });
+
+    let planInfo = null;
+    try {
+      planInfo = await Plan.findOne({
+        where: {
+          plan_key: {
+            [Op.in]: [
+              planKey,
+              planKey === 'starter' ? 'basic' : planKey === 'basic' ? 'starter' : null,
+              planKey === 'career' ? 'advanced' : planKey === 'advanced' ? 'career' : null,
+              planKey === 'placement_pro' ? 'professional' : planKey === 'professional' ? 'placement_pro' : null,
+            ].filter(Boolean)
+          }
+        }
+      });
+    } catch (_e) {}
+
     const PLAN_DETAILS = {
       starter: { name: 'Starter', price: 199, interviews: 10 },
       career: { name: 'Career', price: 499, interviews: 20 },
@@ -1388,36 +1525,64 @@ export class JourneyService {
       const user = await User.findByPk(studentId);
       if (user?.institutionId) {
         const institution = await Institution.findByPk(user.institutionId);
-        negotiatedPrice = institution?.[`${planKey}_price`] ?? null;
+        const priceKey = {
+          starter: 'basic_price',
+          basic: 'basic_price',
+          level_1: 'basic_price',
+          career: 'advanced_price',
+          advanced: 'advanced_price',
+          level_2: 'advanced_price',
+          placement_pro: 'professional_price',
+          professional: 'professional_price',
+          level_3: 'professional_price',
+        }[planKey] || `${planKey}_price`;
+        negotiatedPrice = institution?.[priceKey] ?? null;
       }
     } catch (_e) {
       negotiatedPrice = null;
     }
 
-    const existingSub = await Subscription.findOne({
+    const finalPrice = negotiatedPrice ?? planInfo?.price ?? fallback.price;
+    const finalInterviews = planInfo?.total_interviews || fallback.interviews || (level === 3 ? 30 : level === 2 ? 20 : 10);
+    const finalPlanName = planInfo?.plan_name || fallback.name;
+
+    const existingSubs = await Subscription.findAll({
       where: { student_id: studentId, status: 'active' },
       order: [['created_at', 'DESC']],
     });
-    if (existingSub) {
-      await existingSub.update({ status: 'upgraded' });
+    if (existingSubs.length > 0) {
+      const [latest, ...older] = existingSubs;
+      for (const old of older) {
+        await old.update({ status: 'upgraded' });
+      }
+      await latest.update({
+        plan_key: planKey,
+        plan_name: finalPlanName,
+        plan_id: planInfo?._id || null,
+        access_level: planInfo?.journey_access || level,
+        interviews_total: finalInterviews,
+        status: 'active',
+        amount_paid: finalPrice,
+      });
+      return { success: true, student_id: studentId, plan_key: planKey, access_level: level, amount_paid: finalPrice };
     }
 
     await Subscription.create({
       student_id: studentId,
       plan_key: planKey,
-      plan_name: planInfo?.plan_name || fallback.name,
+      plan_name: finalPlanName,
       plan_id: planInfo?._id || null,
       access_level: planInfo?.journey_access || level,
-      interviews_total: planInfo?.total_interviews || fallback.interviews,
+      interviews_total: finalInterviews,
       status: 'active',
-      amount_paid: negotiatedPrice ?? planInfo?.price ?? fallback.price,
+      amount_paid: finalPrice,
       currency: 'INR',
       gst_amount: 0,
       start_date: new Date(),
       end_date: null,
       invoices: [],
     });
-    return { success: true, student_id: studentId, plan_key: planKey, access_level: level, amount_paid: negotiatedPrice ?? planInfo?.price ?? fallback.price };
+    return { success: true, student_id: studentId, plan_key: planKey, access_level: level, amount_paid: finalPrice };
   }
 
   async bulkAssignSubscription(studentIds, planKey) {
@@ -1457,8 +1622,11 @@ export class JourneyService {
     };
   }
 
-  async assignInstitutionSubscription(institutionId, planKey) {
-    const students = await User.findAll({ where: { institutionId, role: 'student' } });
+  async assignInstitutionSubscription(institutionId, planKey, filters = {}) {
+    const where = { institutionId, role: 'student' };
+    if (filters.department_id) where.department_id = filters.department_id;
+    if (filters.year) where.year = filters.year;
+    const students = await User.findAll({ where });
     const studentIds = students.map(s => s._id);
     return this.bulkAssignSubscription(studentIds, planKey);
   }

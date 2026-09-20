@@ -48,6 +48,9 @@ function serializeInstitution(inst) {
       basic_price: inst.basic_price ?? null,
       advanced_price: inst.advanced_price ?? null,
       professional_price: inst.professional_price ?? null,
+      starter_price: inst.basic_price ?? null,
+      career_price: inst.advanced_price ?? null,
+      placement_pro_price: inst.professional_price ?? null,
     },
     created_by: inst.created_by || null,
     created_at: inst.created_at,
@@ -174,9 +177,13 @@ router.post(
       certificates: req.body.modules?.certificates !== false,
     };
 
+    const priceAliases = {
+      basic_price: req.body.basic_price ?? req.body.starter_price ?? req.body.level_1_price,
+      advanced_price: req.body.advanced_price ?? req.body.career_price ?? req.body.level_2_price,
+      professional_price: req.body.professional_price ?? req.body.placement_pro_price ?? req.body.level_3_price,
+    };
     const prices = {};
-    for (const key of ['basic_price', 'advanced_price', 'professional_price']) {
-      const raw = req.body[key];
+    for (const [key, raw] of Object.entries(priceAliases)) {
       const parsed = raw === undefined || raw === null || raw === '' ? null : parseInt(raw, 10);
       if (parsed !== null && (!Number.isInteger(parsed) || parsed < 0)) {
         throw badRequest(`${key} must be a positive number or blank to use the default`);
@@ -228,9 +235,13 @@ router.patch(
     if (status && ['active', 'inactive'].includes(status)) institution.status = status;
     if (interview_gap_days !== undefined) institution.interview_gap_days = interview_gap_days;
 
-    for (const key of ['basic_price', 'advanced_price', 'professional_price']) {
-      if (req.body[key] === undefined) continue;
-      const raw = req.body[key];
+    const patchPriceAliases = {
+      basic_price: req.body.basic_price !== undefined ? req.body.basic_price : (req.body.starter_price !== undefined ? req.body.starter_price : req.body.level_1_price),
+      advanced_price: req.body.advanced_price !== undefined ? req.body.advanced_price : (req.body.career_price !== undefined ? req.body.career_price : req.body.level_2_price),
+      professional_price: req.body.professional_price !== undefined ? req.body.professional_price : (req.body.placement_pro_price !== undefined ? req.body.placement_pro_price : req.body.level_3_price),
+    };
+    for (const [key, raw] of Object.entries(patchPriceAliases)) {
+      if (raw === undefined) continue;
       const parsed = raw === null || raw === '' ? null : parseInt(raw, 10);
       if (parsed !== null && (!Number.isInteger(parsed) || parsed < 0)) {
         throw badRequest(`${key} must be a positive number or blank to use the default`);
@@ -481,10 +492,44 @@ function avgOf(arr) {
   return Math.round((nums.reduce((s, v) => s + Number(v), 0) / nums.length) * 10) / 10;
 }
 
-const INST_PRICE_KEYS = { basic: 'basic_price', advanced: 'advanced_price', professional: 'professional_price' };
-const DEFAULT_INST_PRICES = { basic: 499, advanced: 1199, professional: 1999 };
-const JOURNEY_LEVEL_PLAN = { 1: 'basic', 3: 'advanced', 6: 'professional' };
-const PLAN_NAMES = { basic: 'Basic', advanced: 'Advanced', professional: 'Professional' };
+const INST_PRICE_KEYS = {
+  starter: 'basic_price',
+  basic: 'basic_price',
+  level_1: 'basic_price',
+  career: 'advanced_price',
+  advanced: 'advanced_price',
+  level_2: 'advanced_price',
+  placement_pro: 'professional_price',
+  professional: 'professional_price',
+  level_3: 'professional_price',
+};
+const DEFAULT_INST_PRICES = {
+  starter: 199,
+  basic: 199,
+  level_1: 199,
+  career: 499,
+  advanced: 499,
+  level_2: 499,
+  placement_pro: 849,
+  professional: 849,
+  level_3: 849,
+};
+const JOURNEY_LEVEL_PLAN = {
+  1: 'starter',
+  2: 'career',
+  3: 'placement_pro',
+};
+const PLAN_NAMES = {
+  starter: 'Level 1: Foundation (Starter)',
+  basic: 'Level 1: Foundation (Starter)',
+  level_1: 'Level 1: Foundation (Starter)',
+  career: 'Level 2: Skill Development (Career)',
+  advanced: 'Level 2: Skill Development (Career)',
+  level_2: 'Level 2: Skill Development (Career)',
+  placement_pro: 'Level 3: Placement Ready (Placement Pro)',
+  professional: 'Level 3: Placement Ready (Placement Pro)',
+  level_3: 'Level 3: Placement Ready (Placement Pro)',
+};
 
 router.get(
   '/analytics/revenue',
@@ -566,6 +611,9 @@ router.get(
             basic: inst.basic_price ?? DEFAULT_INST_PRICES.basic,
             advanced: inst.advanced_price ?? DEFAULT_INST_PRICES.advanced,
             professional: inst.professional_price ?? DEFAULT_INST_PRICES.professional,
+            starter: inst.basic_price ?? DEFAULT_INST_PRICES.starter,
+            career: inst.advanced_price ?? DEFAULT_INST_PRICES.career,
+            placement_pro: inst.professional_price ?? DEFAULT_INST_PRICES.placement_pro,
           },
           plans,
           revenue: plans.reduce((s, p) => s + p.revenue, 0),
@@ -800,9 +848,12 @@ router.get(
         name: institutionRow.name,
         code: institutionRow.code || '',
         pricing: {
-          basic: institutionRow.basic_price ?? 499,
-          advanced: institutionRow.advanced_price ?? 1199,
-          professional: institutionRow.professional_price ?? 1999,
+          basic: institutionRow.basic_price ?? DEFAULT_INST_PRICES.basic,
+          advanced: institutionRow.advanced_price ?? DEFAULT_INST_PRICES.advanced,
+          professional: institutionRow.professional_price ?? DEFAULT_INST_PRICES.professional,
+          starter: institutionRow.basic_price ?? DEFAULT_INST_PRICES.starter,
+          career: institutionRow.advanced_price ?? DEFAULT_INST_PRICES.career,
+          placement_pro: institutionRow.professional_price ?? DEFAULT_INST_PRICES.placement_pro,
         },
       };
     }
@@ -947,11 +998,14 @@ router.get(
       let amountPaid = 0;
       let accessLevel = 0;
       if (institutionRow) {
-        planKey = JOURNEY_LEVEL_PLAN[journeyLevel] || null;
-        planName = planKey ? PLAN_NAMES[planKey] : null;
-        accessLevel = journeyLevel;
+        planKey = sub?.plan_key || JOURNEY_LEVEL_PLAN[journeyLevel] || null;
+        planName = planKey ? (PLAN_NAMES[planKey] || sub?.plan_name) : null;
+        accessLevel = journeyLevel || sub?.access_level || 0;
         if (planKey) {
-          amountPaid = institutionRow[INST_PRICE_KEYS[planKey]] ?? DEFAULT_INST_PRICES[planKey];
+          const priceKey = INST_PRICE_KEYS[planKey];
+          amountPaid = (priceKey && institutionRow[priceKey] != null)
+            ? institutionRow[priceKey]
+            : (DEFAULT_INST_PRICES[planKey] ?? Number(sub?.amount_paid || 0));
         }
       } else {
         planKey = sub?.plan_key || null;

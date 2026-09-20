@@ -1992,9 +1992,17 @@ async function start() {
         AND s.status = 'active'
         AND ind.journey_access != s.access_level;
 
-      UPDATE plans SET journey_access = 1, total_interviews = 10, max_level = 1 WHERE LOWER(plan_key) IN ('starter', 'basic') OR price < 400;
-      UPDATE plans SET journey_access = 2, total_interviews = 20, max_level = 2 WHERE LOWER(plan_key) IN ('career', 'advanced') OR (price >= 400 AND price < 700);
-      UPDATE plans SET journey_access = 3, total_interviews = 30, max_level = 3 WHERE LOWER(plan_key) IN ('placement_pro', 'professional') OR price >= 700;
+      UPDATE plans SET journey_access = 1, total_interviews = 10, max_level = 1,
+        features = '["Foundation Journey Access (Interviews 1–10)", "10 AI Interviews", "Aptitude Fundamentals", "Technical Assessment", "Communication Assessment", "Resume ATS Analysis", "Performance Report"]'::jsonb
+      WHERE LOWER(plan_key) IN ('starter', 'basic') OR price < 400;
+
+      UPDATE plans SET journey_access = 2, total_interviews = 20, max_level = 2,
+        features = '["Starter Features Included", "Skill Development Access (Interviews 1–20)", "20 AI Interviews", "Technical & HR Practice", "Behavioral & STAR Method", "Role-Based Preparation", "Progress Analytics"]'::jsonb
+      WHERE LOWER(plan_key) IN ('career', 'advanced') OR (price >= 400 AND price < 700);
+
+      UPDATE plans SET journey_access = 3, total_interviews = 30, max_level = 3,
+        features = '["Career Features Included", "Full Placement Ready Access (Interviews 1–30)", "All 30 AI Interviews Across All 3 Levels", "Company-Style Mock Interviews", "Final Placement Assessment", "Official Placement-Ready Report", "Verified Certificate", "Priority Support"]'::jsonb
+      WHERE LOWER(plan_key) IN ('placement_pro', 'professional') OR price >= 700;
     `);
     console.log('Phase 5f: 3-Tier subscription & journey normalization completed');
   } catch (_normErr) {
