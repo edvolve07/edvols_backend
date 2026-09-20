@@ -20,7 +20,7 @@ router.get('/my', requireAuth, requireRole('individual_student'), asyncHandler(a
   const stats = await getUserReferralStats(req.user._id);
   const wallet = stats.wallet || await getUserReferralWallet(req.user._id);
 
-  const referralLink = `https://edvols.in/signup?ref=${code}`;
+  const referralLink = `https://app.edvols.in/signup?ref=${code}`;
 
   res.json({
     code,
