@@ -238,7 +238,39 @@ router.post('/interview/start', requireAuth, upload.single('resume'), asyncHandl
   }
 
   const blueprint = getBlueprintByNumber(result.interview_number);
-  const studentContext = { stream: req.user?.stream || '', target_role: req.user?.interested_role || '' };
+  const selectedDomain = req.body?.domain || req.body?.stream || req.body?.selected_domain || req.user?.stream || blueprint?.domain || 'General';
+  const selectedRole = req.body?.role || req.body?.job_role || req.body?.target_role || req.user?.interested_role || blueprint?.role || 'Software Engineer';
+
+  // Load previous questions from past sessions to strictly prevent repetition
+  const previousSessions = await InterviewSession.findAll({
+    where: { student_id: studentId },
+    attributes: ['history'],
+    order: [['created_at', 'DESC']],
+    limit: 5,
+  });
+  const previousQuestions = [];
+  for (const s of previousSessions) {
+    if (Array.isArray(s.history)) {
+      for (const h of s.history) {
+        if (h.question) previousQuestions.push(h.question);
+      }
+    }
+  }
+
+  const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+  const studentContext = {
+    stream: selectedDomain,
+    domain: selectedDomain,
+    role: selectedRole,
+    target_role: selectedRole,
+    previousQuestions,
+    previousPerformance: {
+      level: journey?.current_level || 1,
+      avgScore: journey?.overall_score || null,
+    },
+    userProfile: req.user,
+  };
+
   const firstQuestion = await generateFirstQuestion(resumeText, blueprint, studentContext);
   const maxQuestions = Number(process.env.MAX_QUESTIONS || 10);
 
@@ -248,8 +280,8 @@ router.post('/interview/start', requireAuth, upload.single('resume'), asyncHandl
     student_name: info.name || '',
     student_email: info.email || '',
     student_role: req.user?.role || 'student',
-    domain: studentContext.stream || blueprint?.domain || 'General',
-    role: studentContext.target_role || blueprint?.role || 'Software Engineer',
+    domain: selectedDomain,
+    role: selectedRole,
     resume_text: resumeText,
     ats_analysis: null,
     history: [],
@@ -257,9 +289,12 @@ router.post('/interview/start', requireAuth, upload.single('resume'), asyncHandl
     question_count: 1,
     max_questions: maxQuestions,
     status: 'active',
+    interview_number: result.interview_number,
+    blueprint_title: blueprint?.title || '',
+    blueprint_level: blueprint?.level || 1,
   });
 
-  res.json({ ...result, question: firstQuestion, question_number: 1, max_questions: maxQuestions });
+  res.json({ ...result, question: firstQuestion, question_number: 1, max_questions: maxQuestions, domain: selectedDomain, role: selectedRole });
 }));
 
 router.post('/interview/start/:interviewNumber', requireAuth, upload.single('resume'), asyncHandler(async (req, res) => {
@@ -287,7 +322,39 @@ router.post('/interview/start/:interviewNumber', requireAuth, upload.single('res
   }
 
   const blueprint = getBlueprintByNumber(interviewNumber);
-  const studentContext = { stream: req.user?.stream || '', target_role: req.user?.interested_role || '' };
+  const selectedDomain = req.body?.domain || req.body?.stream || req.body?.selected_domain || req.user?.stream || blueprint?.domain || 'General';
+  const selectedRole = req.body?.role || req.body?.job_role || req.body?.target_role || req.user?.interested_role || blueprint?.role || 'Software Engineer';
+
+  // Load previous questions from past sessions to strictly prevent repetition
+  const previousSessions = await InterviewSession.findAll({
+    where: { student_id: studentId },
+    attributes: ['history'],
+    order: [['created_at', 'DESC']],
+    limit: 5,
+  });
+  const previousQuestions = [];
+  for (const s of previousSessions) {
+    if (Array.isArray(s.history)) {
+      for (const h of s.history) {
+        if (h.question) previousQuestions.push(h.question);
+      }
+    }
+  }
+
+  const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+  const studentContext = {
+    stream: selectedDomain,
+    domain: selectedDomain,
+    role: selectedRole,
+    target_role: selectedRole,
+    previousQuestions,
+    previousPerformance: {
+      level: journey?.current_level || 1,
+      avgScore: journey?.overall_score || null,
+    },
+    userProfile: req.user,
+  };
+
   const firstQuestion = await generateFirstQuestion(resumeText, blueprint, studentContext);
   const maxQuestions = Number(process.env.MAX_QUESTIONS || 10);
 
@@ -299,8 +366,8 @@ router.post('/interview/start/:interviewNumber', requireAuth, upload.single('res
       student_name: req.user?.name || '',
       student_email: req.user?.email || '',
       student_role: req.user?.role || 'student',
-      domain: studentContext.stream || blueprint?.domain || 'General',
-      role: studentContext.target_role || blueprint?.role || 'Software Engineer',
+      domain: selectedDomain,
+      role: selectedRole,
       resume_text: resumeText,
       ats_analysis: null,
       history: [],
@@ -308,12 +375,23 @@ router.post('/interview/start/:interviewNumber', requireAuth, upload.single('res
       question_count: 1,
       max_questions: maxQuestions,
       status: 'active',
+      interview_number: interviewNumber,
+      blueprint_title: blueprint?.title || '',
+      blueprint_level: blueprint?.level || 1,
     });
-  } else if (resumeText) {
-    await existingSession.update({ resume_text: resumeText, current_question: firstQuestion || existingSession.current_question });
+  } else {
+    await existingSession.update({
+      resume_text: resumeText || existingSession.resume_text,
+      current_question: firstQuestion || existingSession.current_question,
+      domain: selectedDomain || existingSession.domain,
+      role: selectedRole || existingSession.role,
+      interview_number: interviewNumber,
+      blueprint_title: blueprint?.title || existingSession.blueprint_title,
+      blueprint_level: blueprint?.level || existingSession.blueprint_level,
+    });
   }
 
-  res.json({ ...result, question: firstQuestion, question_number: 1, max_questions: maxQuestions });
+  res.json({ ...result, question: firstQuestion, question_number: 1, max_questions: maxQuestions, domain: selectedDomain, role: selectedRole });
 }));
 
 router.get('/interview/blueprint/:sessionId', requireAuth, asyncHandler(async (req, res) => {
@@ -343,7 +421,15 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   const blueprint = getBlueprintByNumber(journeyInt.interview_number);
   if (!blueprint) throw new HttpError(500, 'Blueprint not found');
 
-  const studentContext = { stream: req.user?.stream || '', target_role: req.user?.interested_role || '' };
+  const selectedDomain = session.domain || req.user?.stream || 'General';
+  const selectedRole = session.role || req.user?.interested_role || 'Software Engineer';
+  const studentContext = {
+    stream: selectedDomain,
+    domain: selectedDomain,
+    role: selectedRole,
+    target_role: selectedRole,
+    userProfile: req.user,
+  };
   const videoMetrics = sanitizeClientVideoMetrics(rawVideoMetrics);
   const evaluation = await aiService.evaluateBlueprintAnswer(session.current_question, answer, blueprint, videoMetrics, studentContext);
 
@@ -359,15 +445,29 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
   const maxQuestions = Number(process.env.MAX_QUESTIONS || 10);
   const isLast = session.question_count >= maxQuestions;
 
+  const sanitizeEvalMetrics = (ev) => {
+    const comm = ev.communication != null
+      ? Number(ev.communication)
+      : Number((((Number(ev.confidence || 7) + Number(ev.fluency || 7)) / 2)).toFixed(1));
+    const m = {
+      communication: comm,
+      knowledge: Number(ev.knowledge || 0),
+      confidence: Number(ev.confidence || 0),
+      fluency: Number(ev.fluency || 0),
+      skill_relevance: Number(ev.skill_relevance || 0),
+    };
+    if (Number(ev.body_language || 0) > 0) {
+      m.body_language = Number(ev.body_language);
+    }
+    return m;
+  };
+
   if (isLast) {
     await commitInterviewAnswer(session, { history: updatedHistory, status: 'completed' });
     return res.json({
       completed: true,
       feedback: evaluation.feedback || '',
-      metrics: Object.fromEntries(
-        ['confidence', 'body_language', 'knowledge', 'fluency', 'skill_relevance']
-          .map((k) => [k, evaluation[k] || 0])
-      ),
+      metrics: sanitizeEvalMetrics(evaluation),
       strengths: evaluation.strengths || [],
       improvements: evaluation.improvements || [],
       blueprint_score: evaluation.blueprint_score || 0,
@@ -401,10 +501,7 @@ router.post('/interview/answer', requireAuth, asyncHandler(async (req, res) => {
     next_question: nextQuestion,
     question_number: nextQuestionNumber,
     feedback: evaluation.feedback || '',
-    metrics: Object.fromEntries(
-      ['confidence', 'body_language', 'knowledge', 'fluency', 'skill_relevance']
-        .map((k) => [k, evaluation[k] || 0])
-    ),
+    metrics: sanitizeEvalMetrics(evaluation),
     strengths: evaluation.strengths || [],
     improvements: evaluation.improvements || [],
     blueprint_score: evaluation.blueprint_score || 0,
@@ -433,14 +530,55 @@ router.post('/interview/end', requireAuth, asyncHandler(async (req, res) => {
     where: { session_id: sessionId, student_id: studentId }
   });
   const blueprint = journeyInt ? getBlueprintByNumber(journeyInt.interview_number) : null;
+  const ivNum = journeyInt ? journeyInt.interview_number : (session.interview_number || 0);
 
   const avgBlueprintScore = history.reduce((sum, h) => sum + (h.evaluation?.blueprint_score || 0), 0) / history.length;
   const avgMetrics = {};
-  for (const key of ['confidence', 'body_language', 'knowledge', 'fluency', 'skill_relevance']) {
-    avgMetrics[key] = history.reduce((sum, h) => sum + (h.evaluation?.[key] || 0), 0) / history.length;
+  const primaryKeys = ['communication', 'knowledge', 'confidence', 'fluency', 'skill_relevance'];
+  for (const key of primaryKeys) {
+    const sum = history.reduce((s, h) => {
+      let v = h.evaluation?.[key];
+      if (v == null && key === 'communication') {
+        v = (((Number(h.evaluation?.confidence || 7)) + Number(h.evaluation?.fluency || 7)) / 2);
+      }
+      return s + Number(v || 0);
+    }, 0);
+    avgMetrics[key] = Number((sum / history.length).toFixed(1));
   }
-  const avgAll = Object.values(avgMetrics).reduce((s, v) => s + v, 0) / Object.keys(avgMetrics).length;
-  const pct = Math.round(avgAll * 10);
+
+  // Include body_language only if any non-zero values were recorded
+  const hasBodyLang = history.some((h) => Number(h.evaluation?.body_language || 0) > 0);
+  if (hasBodyLang) {
+    const sumBody = history.reduce((s, h) => s + Number(h.evaluation?.body_language || 0), 0);
+    avgMetrics.body_language = Number((sumBody / history.length).toFixed(1));
+  }
+
+  const primarySum = primaryKeys.reduce((s, k) => s + (avgMetrics[k] || 0), 0);
+  const avgAll = primarySum / primaryKeys.length;
+  const pct = Math.min(100, Math.max(0, Math.round(avgAll * 10)));
+  const totalScore = Number((primarySum * history.length).toFixed(1));
+  const maxScore = history.length * 50;
+
+  // Generate placement readiness report for milestone interviews 10, 20 and capstone interview 30
+  let placementReadiness = null;
+  if (ivNum === 10 || ivNum === 20 || ivNum === 30) {
+    try {
+      const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+      placementReadiness = await aiService.generatePlacementReadinessReport({
+        interviewNumber: ivNum,
+        domain: session.domain || blueprint?.domain || 'General',
+        role: session.role || blueprint?.role || 'Software Engineer',
+        history,
+        studentProfile: req.user,
+        level1Score: journey?.current_level >= 2 ? (journey.overall_score || 75) : null,
+        level2Score: journey?.current_level >= 3 ? (journey.overall_score || 80) : null,
+        previousWeaknesses: history.flatMap((h) => h.evaluation?.improvements || []).slice(0, 5),
+        previousStrengths: history.flatMap((h) => h.evaluation?.strengths || []).slice(0, 5),
+      });
+    } catch (err) {
+      console.error('Failed to generate placement readiness report in /interview/end:', err.message);
+    }
+  }
 
   const reportData = {
     session_id: sessionId,
@@ -450,29 +588,47 @@ router.post('/interview/end', requireAuth, asyncHandler(async (req, res) => {
     blueprint_title: blueprint?.title || '',
     blueprint_level: blueprint?.level || 0,
     overall: {
+      total_score: totalScore,
+      max_score: maxScore,
       percentage: pct,
       grade: pct >= 80 ? 'A' : pct >= 60 ? 'B' : pct >= 40 ? 'C' : 'D',
       grade_label: pct >= 80 ? 'Excellent' : pct >= 60 ? 'Good' : pct >= 40 ? 'Average' : 'Needs Improvement',
       average_score: avgAll,
       blueprint_avg: avgBlueprintScore,
       metrics: avgMetrics,
+      placement_readiness: placementReadiness,
     },
-    question_breakdown: history.map((h) => ({
-      question: h.question,
-      answer: h.answer,
-      question_number: h.question_number,
-      scores: {
-        confidence: h.evaluation?.confidence || 0,
-        body_language: h.evaluation?.body_language || 0,
-        knowledge: h.evaluation?.knowledge || 0,
-        fluency: h.evaluation?.fluency || 0,
-        skill_relevance: h.evaluation?.skill_relevance || 0,
-      },
-      feedback: h.evaluation?.feedback || '',
-      strengths: h.evaluation?.strengths || [],
-      improvements: h.evaluation?.improvements || [],
-      blueprint_score: h.evaluation?.blueprint_score || 0,
-    })),
+    question_breakdown: history.map((h, index) => {
+      const commScore = h.evaluation?.communication != null
+        ? Number(h.evaluation.communication)
+        : Number((((Number(h.evaluation?.confidence || 7) + Number(h.evaluation?.fluency || 7)) / 2)).toFixed(1));
+      const scores = {
+        communication: commScore,
+        knowledge: Number(h.evaluation?.knowledge || 0),
+        confidence: Number(h.evaluation?.confidence || 0),
+        fluency: Number(h.evaluation?.fluency || 0),
+        skill_relevance: Number(h.evaluation?.skill_relevance || 0),
+        ...(Number(h.evaluation?.body_language || 0) > 0 ? { body_language: Number(h.evaluation.body_language) } : {}),
+      };
+      return {
+        number: h.question_number || index + 1,
+        question: h.question,
+        answer: h.answer,
+        question_number: h.question_number || index + 1,
+        scores,
+        evaluation: {
+          ...scores,
+          feedback: h.evaluation?.feedback || '',
+          strengths: h.evaluation?.strengths || [],
+          improvements: h.evaluation?.improvements || [],
+          blueprint_score: h.evaluation?.blueprint_score || 0,
+        },
+        feedback: h.evaluation?.feedback || '',
+        strengths: h.evaluation?.strengths || [],
+        improvements: h.evaluation?.improvements || [],
+        blueprint_score: h.evaluation?.blueprint_score || 0,
+      };
+    }),
     strengths: history.flatMap((h) => h.evaluation?.strengths || []).slice(0, 5),
     improvements: history.flatMap((h) => h.evaluation?.improvements || []).slice(0, 5),
     created_at: new Date(),

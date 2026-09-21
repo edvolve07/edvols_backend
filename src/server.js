@@ -109,10 +109,20 @@ app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
 
 function pickMetrics(evaluation) {
-  return Object.fromEntries(
-    ["confidence", "body_language", "knowledge", "fluency", "skill_relevance"]
-      .map((key) => [key, evaluation?.[key] || 0])
-  );
+  const comm = evaluation?.communication != null
+    ? Number(evaluation.communication)
+    : Number((((Number(evaluation?.confidence || 7) + Number(evaluation?.fluency || 7)) / 2)).toFixed(1));
+  const metrics = {
+    communication: comm,
+    knowledge: Number(evaluation?.knowledge || 0),
+    confidence: Number(evaluation?.confidence || 0),
+    fluency: Number(evaluation?.fluency || 0),
+    skill_relevance: Number(evaluation?.skill_relevance || 0),
+  };
+  if (Number(evaluation?.body_language || 0) > 0) {
+    metrics.body_language = Number(evaluation.body_language);
+  }
+  return metrics;
 }
 
 function fileExtension(file, fallback) {
@@ -194,10 +204,11 @@ async function handleAnswer({ sessionId, answer, user, videoMetrics = null, ques
 
   const blueprint = session.interview_number ? getBlueprintByNumber(session.interview_number) : null;
   const studentContext = {
-    stream: "",
-    target_role: "",
+    stream: user?.stream || session.domain || "",
+    target_role: user?.interested_role || session.role || "",
     domain: session.domain,
     role: session.role,
+    userProfile: user,
   };
 
   const evaluation = blueprint
@@ -461,11 +472,34 @@ app.post("/api/start", requireAuth, requireModuleAccess('ai_interview'), upload.
   const interviewNumber = await getNextInterviewNumber(req.user._id);
   const blueprint = getBlueprintByNumber(interviewNumber) || BLUEPRINTS[0];
 
+  // Load previous questions to strictly prevent repetition
+  const previousSessions = await InterviewSession.findAll({
+    where: { student_id: req.user._id },
+    attributes: ['history'],
+    order: [['created_at', 'DESC']],
+    limit: 5,
+  });
+  const previousQuestions = [];
+  for (const s of previousSessions) {
+    if (Array.isArray(s.history)) {
+      for (const h of s.history) {
+        if (h.question) previousQuestions.push(h.question);
+      }
+    }
+  }
+
+  const journey = await StudentJourney.findOne({ where: { student_id: req.user._id } });
   const studentContext = {
-    stream: req.user?.stream || "",
-    target_role: req.user?.interested_role || "",
+    stream: req.user?.stream || domain || "",
+    target_role: req.user?.interested_role || role || "",
     domain,
     role,
+    previousQuestions,
+    previousPerformance: {
+      level: journey?.current_level || 1,
+      avgScore: journey?.overall_score || null,
+    },
+    userProfile: req.user,
   };
 
   let firstQuestion = "";
@@ -638,14 +672,31 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
     answer: item.answer || "Not Answered"
   }));
 
-  const metricKeys = ["confidence", "body_language", "knowledge", "fluency", "skill_relevance"];
+  const metricKeys = ["communication", "knowledge", "confidence", "fluency", "skill_relevance"];
   const metricSums = Object.fromEntries(metricKeys.map((key) => [key, 0]));
   const evaluations = [];
+  let bodyLangSum = 0;
+  let hasBodyLang = false;
 
   for (const item of history) {
-    const evaluation = item.evaluation || {};
+    const rawEv = item.evaluation || {};
+    const comm = rawEv.communication != null
+      ? Number(rawEv.communication)
+      : Number((((Number(rawEv.confidence || 7) + Number(rawEv.fluency || 7)) / 2)).toFixed(1));
+    const evaluation = {
+      ...rawEv,
+      communication: comm,
+      knowledge: Number(rawEv.knowledge || 0),
+      confidence: Number(rawEv.confidence || 0),
+      fluency: Number(rawEv.fluency || 0),
+      skill_relevance: Number(rawEv.skill_relevance || 0),
+    };
     for (const key of metricKeys) {
-      metricSums[key] += Number(evaluation[key] || 0);
+      metricSums[key] += evaluation[key];
+    }
+    if (Number(rawEv.body_language || 0) > 0) {
+      hasBodyLang = true;
+      bodyLangSum += Number(rawEv.body_language);
     }
     evaluations.push(evaluation);
   }
@@ -654,9 +705,12 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
   const avg = Object.fromEntries(
     metricKeys.map((key) => [key, Number((metricSums[key] / count).toFixed(1))])
   );
-  const totalScore = Object.values(metricSums).reduce((sum, value) => sum + value, 0);
+  if (hasBodyLang) {
+    avg.body_language = Number((bodyLangSum / count).toFixed(1));
+  }
+  const totalScore = Number(Object.values(metricSums).reduce((sum, value) => sum + value, 0).toFixed(1));
   const maxPossible = (history.length || 1) * 50;
-  const percentage = maxPossible ? (totalScore / maxPossible) * 100 : 0;
+  const percentage = maxPossible ? Math.min(100, Math.max(0, Math.round((totalScore / maxPossible) * 100))) : 0;
   let grade = "F";
   let label = "Re-take";
 
@@ -694,12 +748,13 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
     (ats.improvements || []).slice(0, 3).forEach((imp) => impSet.add(imp));
 
     if (sSet.size === 0) {
+      if ((avg.communication || 0) >= 6) sSet.add("Articulated thoughts clearly with structured professional expression.");
       if ((avg.confidence || 0) >= 6) sSet.add("Demonstrated composure and steady confidence throughout answers.");
       if ((avg.knowledge || 0) >= 6) sSet.add("Showed solid grasp of foundational domain principles.");
       sSet.add("Maintained active engagement across all interview questions.");
     }
     if (impSet.size === 0) {
-      if ((avg.body_language || 0) < 6) impSet.add("Enhance non-verbal presence: maintain strong eye contact and posture.");
+      if ((avg.communication || 0) < 6) impSet.add("Strengthen answer structure: use concise, impact-focused sentences.");
       if ((avg.fluency || 0) < 6) impSet.add("Practice seamless transitions to reduce pauses and conversational hesitation.");
       impSet.add("Structure complex technical answers using the STAR format (Situation, Task, Action, Result).");
     }
@@ -719,20 +774,58 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
   const reportId = `FB-${new Date().toISOString().slice(0, 10)}-${uuidv4().slice(0, 3).toUpperCase()}`;
 
   const questionBreakdown = history.length
-    ? history.map((item, index) => ({
-        number: index + 1,
-        question: item.question,
-        answer: item.answer && item.answer !== "Not Answered" && item.answer.length > 200
-          ? `${item.answer.slice(0, 200)}...`
-          : item.answer || "Not Answered",
-        evaluation: item.evaluation || {}
-      }))
+    ? history.map((item, index) => {
+        const rawEv = item.evaluation || {};
+        const comm = rawEv.communication != null
+          ? Number(rawEv.communication)
+          : Number((((Number(rawEv.confidence || 7) + Number(rawEv.fluency || 7)) / 2)).toFixed(1));
+        const ev = {
+          ...rawEv,
+          communication: comm,
+          knowledge: Number(rawEv.knowledge || 0),
+          confidence: Number(rawEv.confidence || 0),
+          fluency: Number(rawEv.fluency || 0),
+          skill_relevance: Number(rawEv.skill_relevance || 0),
+          ...(Number(rawEv.body_language || 0) > 0 ? { body_language: Number(rawEv.body_language) } : {}),
+        };
+        return {
+          number: index + 1,
+          question: item.question,
+          answer: item.answer && item.answer !== "Not Answered" && item.answer.length > 200
+            ? `${item.answer.slice(0, 200)}...`
+            : item.answer || "Not Answered",
+          evaluation: ev,
+          scores: ev,
+        };
+      })
     : [{
         number: 1,
         question: session.current_question || "No question was asked",
         answer: "Not Answered",
-        evaluation: {}
+        evaluation: { communication: 7, knowledge: 7, confidence: 7, fluency: 7, skill_relevance: 7 },
+        scores: { communication: 7, knowledge: 7, confidence: 7, fluency: 7, skill_relevance: 7 },
       }];
+
+  let placementReadiness = null;
+  const ivNum = session.interview_number || 0;
+  if (ivNum === 10 || ivNum === 20 || ivNum === 30) {
+    try {
+      const journey = await StudentJourney.findOne({ where: { student_id: session.student_id } });
+      placementReadiness = await aiService.generatePlacementReadinessReport({
+        interviewNumber: ivNum,
+        domain: session.domain || 'General',
+        role: session.role || 'Software Engineer',
+        history,
+        studentProfile: req.user,
+        level1Score: journey?.current_level >= 2 ? (journey.overall_score || 75) : null,
+        level2Score: journey?.current_level >= 3 ? (journey.overall_score || 80) : null,
+        previousWeaknesses: summary?.areas_to_improve || [],
+        previousStrengths: summary?.strengths || [],
+      });
+    } catch (err) {
+      console.error('Failed to generate placement readiness in /api/end:', err.message);
+    }
+  }
 
   const report = {
     session_id: sessionId,
@@ -757,7 +850,8 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
       percentage: Number(percentage.toFixed(2)),
       grade,
       grade_label: label,
-      metrics: avg
+      metrics: avg,
+      placement_readiness: placementReadiness,
     },
     ats_analysis: {
       ats_score: ats.ats_score || 0,
@@ -914,35 +1008,66 @@ app.get("/api/reports", requireAuth, requireModuleAccess('ai_interview'), asyncH
   });
 }));
 
+function normalizeReportForResponse(rawReport) {
+  const report = rawReport.toJSON ? rawReport.toJSON() : { ...rawReport };
+  if (report.overall) {
+    report.overall.metrics = report.overall.metrics || {};
+    if (report.overall.metrics.communication == null) {
+      const flu = Number(report.overall.metrics.fluency || 7);
+      const conf = Number(report.overall.metrics.confidence || 7);
+      report.overall.metrics.communication = Number(((flu + conf) / 2).toFixed(1));
+    }
+  }
+  if (Array.isArray(report.question_breakdown)) {
+    report.question_breakdown = report.question_breakdown.map((q, idx) => {
+      const ev = { ...(q.evaluation || q.scores || {}) };
+      if (ev.communication == null) {
+        const flu = Number(ev.fluency || 7);
+        const conf = Number(ev.confidence || 7);
+        ev.communication = Number(((flu + conf) / 2).toFixed(1));
+      }
+      return {
+        number: q.number || q.question_number || idx + 1,
+        ...q,
+        evaluation: ev,
+        scores: q.scores ? { ...q.scores, communication: ev.communication } : ev,
+      };
+    });
+  }
+  return report;
+}
+
 app.get("/api/report/:session_id", requireAuth, requireModuleAccess('ai_interview'), asyncHandler(async (req, res) => {
-  const report = await InterviewReport.findOne({
+  const rawReport = await InterviewReport.findOne({
     where: { session_id: req.params.session_id },
     attributes: { exclude: ['_id'] },
   });
 
-  if (!report) {
+  if (!rawReport) {
     throw new HttpError(404, "Report not found");
   }
-  if (!await canAccessStudentRecord(req.user, report.student_id)) {
+  if (!await canAccessStudentRecord(req.user, rawReport.student_id)) {
     throw new HttpError(403, "You do not have permission to access this report");
   }
 
+  const report = normalizeReportForResponse(rawReport);
   res.json(report);
 }));
 
 app.get("/api/report/:session_id/pdf", requireAuth, requireModuleAccess('ai_interview'), asyncHandler(async (req, res) => {
-  const report = await InterviewReport.findOne({
+  const rawReport = await InterviewReport.findOne({
     where: { session_id: req.params.session_id },
     attributes: { exclude: ['_id'] },
   });
 
-  if (!report) {
+  if (!rawReport) {
     throw new HttpError(404, "Report not found");
   }
-  if (!await canAccessStudentRecord(req.user, report.student_id)) {
+  if (!await canAccessStudentRecord(req.user, rawReport.student_id)) {
     throw new HttpError(403, "You do not have permission to access this report");
   }
 
+  const report = normalizeReportForResponse(rawReport);
   const pdf = await generatePerformancePdf(report);
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename=report_${req.params.session_id}.pdf`);
@@ -1723,32 +1848,10 @@ async function start() {
   }
 
   try {
-    const { BLUEPRINTS } = await import("./mentorship/blueprints.js");
-    const { JourneyBlueprint } = await import("./database/index.js");
-    const existingCount = await JourneyBlueprint.count();
-    if (existingCount === 0) {
-      for (const bp of BLUEPRINTS) {
-        await JourneyBlueprint.upsert({
-          interview_number: bp.interview_number,
-          title: bp.title,
-          level: bp.level,
-          objective: bp.objective,
-          focus_areas: bp.focus_areas,
-          difficulty: bp.difficulty,
-          ai_prompt: bp.ai_prompt,
-          follow_up_guidelines: bp.follow_up_guidelines,
-          evaluation_criteria: bp.evaluation_criteria,
-          domain: bp.domain,
-          role: bp.role,
-          category: bp.category,
-        });
-      }
-      console.log(`Seeded ${BLUEPRINTS.length} journey blueprints`);
-    } else {
-      console.log(`Journey blueprints already exist (${existingCount} found)`);
-    }
+    const { runMigration } = await import("./database/migrations/migrateTo30DynamicPatterns.js");
+    await runMigration();
   } catch (_err) {
-    console.log('Blueprint seeding skipped:', _err.message);
+    console.log('Blueprint migration skipped:', _err.message);
   }
 
   // ── Phase 4: Institution interview gap setting ─────────────────────────

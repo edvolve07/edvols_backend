@@ -19,6 +19,7 @@ const COLORS = {
 };
 
 const METRIC_LABELS = {
+  communication: "Communication Skills",
   confidence: "Confidence",
   body_language: "Body Language",
   knowledge: "Technical Knowledge",
@@ -48,44 +49,38 @@ function checkPageBreak(doc, neededHeight = 60) {
 }
 
 function drawHeaderBanner(doc, title, subtitle = "") {
-  const startY = 40;
-  // Brand badge
-  doc.roundedRect(40, startY, 70, 20, 4).fill(COLORS.primary);
-  doc.font("Helvetica-Bold").fontSize(9).fillColor(COLORS.white)
-    .text("EDVOLS", 40, startY + 5, { width: 70, align: "center" });
+  checkPageBreak(doc, 70);
+  const startY = doc.y;
 
-  // Title
-  doc.font("Helvetica-Bold").fontSize(18).fillColor(COLORS.slateDark)
-    .text(title, 120, startY - 1, { width: 440 });
+  doc.roundedRect(40, startY, 520, 60, 8).fill(COLORS.primary);
+
+  doc.font("Helvetica-Bold").fontSize(18).fillColor(COLORS.white)
+    .text(title, 56, startY + 12, { width: 488 });
 
   if (subtitle) {
-    doc.font("Helvetica").fontSize(9).fillColor(COLORS.slateMuted)
-      .text(subtitle, 120, startY + 20, { width: 440 });
-    doc.y = startY + 38;
-  } else {
-    doc.y = startY + 28;
+    doc.font("Helvetica").fontSize(9.5).fillColor("#d1fae5")
+      .text(subtitle, 56, startY + 36, { width: 488 });
   }
 
-  doc.moveTo(40, doc.y).lineTo(560, doc.y).strokeColor(COLORS.border).lineWidth(1).stroke();
-  doc.moveDown(0.8);
+  doc.y = startY + 70;
 }
 
 function drawDetailsCard(doc, details = []) {
-  checkPageBreak(doc, 70);
+  checkPageBreak(doc, 50);
   const cardY = doc.y;
-  const cardWidth = 520;
-  const colWidth = cardWidth / Math.min(details.length, 3);
-  const cardHeight = Math.ceil(details.length / 3) * 32 + 16;
+  const colWidth = 173;
+  const rowHeight = 28;
+  const rows = Math.ceil(details.length / 3);
+  const cardHeight = rows * rowHeight + 10;
 
-  doc.roundedRect(40, cardY, cardWidth, cardHeight, 6)
-    .fillAndStroke(COLORS.slateLight, COLORS.border);
+  doc.roundedRect(40, cardY, 520, cardHeight, 6).fillAndStroke(COLORS.slateLight, COLORS.border);
 
   let idx = 0;
   for (const item of details) {
     const col = idx % 3;
     const row = Math.floor(idx / 3);
     const itemX = 52 + col * colWidth;
-    const itemY = cardY + 10 + row * 32;
+    const itemY = cardY + 8 + row * rowHeight;
 
     doc.font("Helvetica").fontSize(8).fillColor(COLORS.slateMuted)
       .text(item.label.toUpperCase(), itemX, itemY, { width: colWidth - 10 });
@@ -148,15 +143,21 @@ function drawMetricsGrid(doc, metrics = {}) {
     const boxX = 40 + idx * (colWidth + 8);
     const boxY = startY;
 
-    doc.roundedRect(boxX, boxY, colWidth, 52, 6).fillAndStroke(COLORS.slateLight, COLORS.border);
+    doc.roundedRect(boxX, boxY, colWidth, 54, 6).fillAndStroke(COLORS.slateLight, COLORS.border);
 
-    doc.font("Helvetica-Bold").fontSize(14).fillColor(scoreColor(num, 10))
-      .text(`${num.toFixed(1)}`, boxX, boxY + 8, { width: colWidth, align: "center" });
+    doc.font("Helvetica-Bold").fontSize(13).fillColor(scoreColor(num, 10))
+      .text(`${num.toFixed(1)}/10`, boxX, boxY + 7, { width: colWidth, align: "center" });
     doc.font("Helvetica").fontSize(7).fillColor(COLORS.slateMuted)
-      .text(METRIC_LABELS[key] || key.replace(/_/g, " "), boxX + 4, boxY + 28, { width: colWidth - 8, align: "center", maxLines: 2 });
+      .text(METRIC_LABELS[key] || key.replace(/_/g, " "), boxX + 3, boxY + 24, { width: colWidth - 6, align: "center", maxLines: 2 });
+
+    // Dynamic mini progress bar
+    const barW = Math.max(10, colWidth - 14);
+    const fillW = Math.max(2, barW * (Math.min(10, Math.max(0, num)) / 10));
+    doc.roundedRect(boxX + 7, boxY + 44, barW, 3, 1.5).fill(COLORS.border);
+    doc.roundedRect(boxX + 7, boxY + 44, fillW, 3, 1.5).fill(scoreColor(num, 10));
   });
 
-  doc.y = startY + 64;
+  doc.y = startY + 66;
 }
 
 function drawBulletSection(doc, title, items = [], iconColor = COLORS.primary) {

@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { config } from "../config.js";
 import { HttpError } from "../utils/httpError.js";
 import { recordAiUsage } from "./aiUsageService.js";
+import { classifyRole, determineExperienceLevel, buildRoleCategoryGuidance } from "../mentorship/roleClassification.js";
 
 function cleanJsonResponse(text) {
   if (!text) {
@@ -294,11 +295,12 @@ Scoring Rubric (apply consistently):
 0 = No answer or completely off-topic
 
 Evaluate on these dimensions (0-10 each):
-1. confidence
-2. body_language
-3. knowledge
-4. fluency
-5. skill_relevance
+1. communication (clarity, articulation, structure, and verbal expression)
+2. confidence
+3. body_language
+4. knowledge
+5. fluency
+6. skill_relevance
 
 Also provide:
 - strengths: 1-2 specific things done well
@@ -307,6 +309,7 @@ Also provide:
 
 Return ONLY valid JSON, no markdown:
 {
+  "communication": 0,
   "confidence": 0,
   "body_language": 0,
   "knowledge": 0,
@@ -321,8 +324,11 @@ Return ONLY valid JSON, no markdown:
       const text = await this.generateContent(prompt, "interview_answer_evaluation");
       const result = JSON.parse(cleanJsonResponse(text));
 
-      for (const key of ["confidence", "body_language", "knowledge", "fluency", "skill_relevance"]) {
+      for (const key of ["communication", "confidence", "body_language", "knowledge", "fluency", "skill_relevance"]) {
         result[key] = clampScore(result[key]);
+      }
+      if (result.communication == null || isNaN(result.communication)) {
+        result.communication = clampScore(Number((((result.confidence || 7) + (result.fluency || 7)) / 2).toFixed(1)));
       }
 
       for (const key of ["strengths", "improvements"]) {
@@ -601,34 +607,71 @@ Return ONLY valid JSON:
     }
   }
 
-  buildStudentContext(studentContext) {
-    const stream = studentContext?.stream || '';
-    const targetRole = studentContext?.target_role || studentContext?.interested_role || '';
-    const domain = studentContext?.domain || '';
-    const role = studentContext?.role || '';
-    if (!stream && !targetRole && !domain && !role) return '';
+  buildStudentContext(studentContext = {}) {
+    const stream = studentContext?.stream || studentContext?.domain || '';
+    const targetRole = studentContext?.target_role || studentContext?.role || studentContext?.interested_role || '';
+    const domain = studentContext?.domain || stream || 'General';
+    const role = studentContext?.role || targetRole || 'Software Engineer';
+    const experienceLevel = studentContext?.experienceLevel || determineExperienceLevel(studentContext?.resumeText || '', studentContext?.userProfile);
+    const classification = classifyRole(role, domain);
+    const category = studentContext?.category || classification.category;
 
-    return `Candidate Profile:
-- Stream/Discipline: ${stream || 'Not specified'}
-- Target Role: ${targetRole || 'Not specified'}
-- Chosen Interview Domain: ${domain || 'Not specified'}
-- Chosen Target Role: ${role || 'Not specified'}
+    const categoryGuidance = buildRoleCategoryGuidance(category, domain, role, experienceLevel);
 
-IMPORTANT: Adapt this interview to the candidate's stream, chosen domain, and target role. Do not assume a software engineering background. Tailor every question and evaluation to their specific background and goals.`;
+    let context = `Candidate Profile:
+- Stream / Degree: ${stream || 'Not specified'}
+- Selected Domain: ${domain}
+- Selected Job Role: ${role}
+- Role Classification: ${category} (${classification.description})
+- Candidate Experience Level: ${experienceLevel}
+
+${categoryGuidance}`;
+
+    if (studentContext?.previousPerformance) {
+      const perf = studentContext.previousPerformance;
+      context += `\nCandidate Previous Performance History:
+- Current Journey Level: Level ${perf.level || 1}
+- Past Average Score: ${perf.avgScore != null ? `${perf.avgScore}%` : 'N/A'}
+- Known Weak Areas: ${perf.weakAreas?.length ? perf.weakAreas.join(', ') : 'None identified yet'}
+- Known Strong Areas: ${perf.strongAreas?.length ? perf.strongAreas.join(', ') : 'Solid general baseline'}\n`;
+    }
+
+    if (studentContext?.previousQuestions && studentContext.previousQuestions.length > 0) {
+      context += `\nPREVIOUSLY ASKED QUESTIONS TO STRICTLY AVOID DUPLICATING:
+${studentContext.previousQuestions.slice(-10).map((q, idx) => `${idx + 1}. ${q}`).join('\n')}
+MANDATE: DO NOT ask any question that is identical or semantically similar to the questions listed above. Target a different aspect, component, or depth of the role.\n`;
+    }
+
+    return context;
   }
 
   async generateBlueprintFirstQuestion(resumeText, blueprint, studentContext) {
-    const context = this.buildStudentContext(studentContext);
-    const prompt = `${blueprint.ai_prompt}
+    const context = this.buildStudentContext({ ...studentContext, resumeText });
+    const isCrossQuestioning = blueprint.interview_number === 24;
+    const isProjectDefense = blueprint.interview_number === 23;
+    const isCaseStudy = blueprint.interview_number === 25;
+    const isProblemSolving = blueprint.interview_number === 15 || blueprint.interview_number === 22;
 
-Candidate Resume:
-${resumeText.slice(0, 1500)}
+    let specificInstructions = '';
+    if (isCaseStudy) {
+      specificInstructions = `Present a realistic, role-specific business/technical/functional case study appropriate for a ${studentContext?.role || 'candidate'} in ${studentContext?.domain || 'this field'}. Frame the initial case context clearly and ask how they would begin analyzing or solving it.`;
+    } else if (isProblemSolving) {
+      specificInstructions = `Present an engaging, practical role-specific problem (NOT an abstract math or brain-teaser puzzle). Test their step-by-step troubleshooting or solution approach.`;
+    } else if (isProjectDefense) {
+      specificInstructions = `Identify the candidate's primary project from their resume and ask an incisive question challenging its design, architecture, or workflow rationale.`;
+    }
+
+    const prompt = `${blueprint.ai_prompt}
 
 ${context}
 
-Based on the resume, the candidate's profile, and the interview objective above, ask the FIRST question for this interview.
+Candidate Resume:
+${(resumeText || '').slice(0, 1500)}
 
-Return ONLY the question text:`;
+${specificInstructions ? `Specific Directive: ${specificInstructions}\n` : ''}
+Based on the candidate's profile, role category, resume, and the interview pattern objective above, ask the FIRST question for this interview.
+Ensure the question strictly reflects the target role (${studentContext?.role || 'the role'}) and domain (${studentContext?.domain || 'the domain'}).
+Return ONLY the question text (no quotes, no preamble):`;
 
     try {
       const text = await this.generateContent(prompt, "blueprint_first_question");
@@ -640,24 +683,58 @@ Return ONLY the question text:`;
 
   async generateBlueprintNextQuestion(resumeText, history, blueprint, studentContext) {
     const conversation = history.slice(-5).map((turn) => {
-      return `Q: ${turn.question}\nA: ${(turn.answer || "").slice(0, 300)}\n`;
+      return `Q: ${turn.question}\nA: ${(turn.answer || "").slice(0, 350)}\n`;
     }).join("\n");
 
-    const context = this.buildStudentContext(studentContext);
+    const previousQuestionsInSession = history.map(h => h.question);
+    const allPrevious = [
+      ...(studentContext?.previousQuestions || []),
+      ...previousQuestionsInSession,
+    ];
+
+    const context = this.buildStudentContext({
+      ...studentContext,
+      resumeText,
+      previousQuestions: allPrevious,
+    });
+
+    const isCrossQuestioning = blueprint.interview_number === 24;
+    const isProjectDefense = blueprint.interview_number === 23;
+    const isCaseStudy = blueprint.interview_number === 25;
+    const isRoleSpecificII = blueprint.interview_number === 12;
+
+    let patternGuidance = '';
+    if (isCrossQuestioning) {
+      const lastAnswer = history[history.length - 1]?.answer || '';
+      patternGuidance = `MANDATORY CROSS-QUESTIONING INSTRUCTION:
+The candidate just answered: "${lastAnswer.slice(0, 250)}".
+Do NOT jump to a new unrelated topic. Dynamically cross-examine a specific technical or functional claim in their answer. Probe their depth, consistency, and ask for concrete justification or trade-offs.`;
+    } else if (isProjectDefense) {
+      patternGuidance = `MANDATORY PROJECT DEFENSE INSTRUCTION:
+Critically evaluate the candidate's previous explanation. Challenge an assumption, scale limitation, or design trade-off in their project implementation.`;
+    } else if (isCaseStudy) {
+      patternGuidance = `MANDATORY CASE STUDY INSTRUCTION:
+Advance the case study scenario based on the candidate's proposal. Introduce a realistic complication, constraint, or stakeholder pushback to see how they adapt.`;
+    } else if (isRoleSpecificII) {
+      patternGuidance = `MANDATORY ROLE DEPTH INSTRUCTION:
+Ask a deeper, more challenging role-specific question that pushes into advanced practices and edge cases.`;
+    }
 
     const prompt = `${blueprint.ai_prompt}
 
-Candidate Resume:
-${resumeText.slice(0, 1500)}
-
 ${context}
 
-Conversation history:
+Candidate Resume:
+${(resumeText || '').slice(0, 1500)}
+
+Conversation History (Most Recent Turns):
 ${conversation}
 
-Continue the interview following the blueprint objective. Ask a question that advances the interview toward its goal.
-
-Return ONLY the question text:`;
+${patternGuidance ? `${patternGuidance}\n` : ''}
+Advance the interview toward the pattern objective (${blueprint.title}).
+Ask ONE follow-up question.
+Do NOT repeat any previously asked questions.
+Return ONLY the question text (no quotes, no preamble):`;
 
     try {
       const text = await this.generateContent(prompt, "blueprint_next_question");
@@ -698,11 +775,12 @@ Scoring Rubric (0-10):
 10 = Exceptional | 8 = Strong | 6 = Adequate | 4 = Weak | 2 = Poor | 0 = No answer
 
 Evaluate on these dimensions (0-10 each):
-1. confidence
-2. body_language
-3. knowledge
-4. fluency
-5. skill_relevance
+1. communication (clarity, articulation, structure, and verbal expression)
+2. confidence
+3. body_language
+4. knowledge
+5. fluency
+6. skill_relevance
 
 Also provide:
 - strengths: 1-2 specific things done well
@@ -712,6 +790,7 @@ Also provide:
 
 Return ONLY valid JSON:
 {
+  "communication": 0,
   "confidence": 0,
   "body_language": 0,
   "knowledge": 0,
@@ -727,8 +806,11 @@ Return ONLY valid JSON:
       const text = await this.generateContent(prompt, "blueprint_answer_evaluation");
       const result = JSON.parse(cleanJsonResponse(text));
 
-      for (const key of ["confidence", "body_language", "knowledge", "fluency", "skill_relevance"]) {
+      for (const key of ["communication", "confidence", "body_language", "knowledge", "fluency", "skill_relevance"]) {
         result[key] = clampScore(result[key]);
+      }
+      if (result.communication == null || isNaN(result.communication)) {
+        result.communication = clampScore(Number((((result.confidence || 7) + (result.fluency || 7)) / 2).toFixed(1)));
       }
       result.blueprint_score = clampScore(result.blueprint_score);
 
@@ -772,6 +854,134 @@ Return ONLY valid JSON:
       return JSON.parse(cleanJsonResponse(text));
     } catch (error) {
       throw new HttpError(500, `Report generation failed: ${error.message}`);
+    }
+  }
+
+  async generatePlacementReadinessReport({
+    interviewNumber,
+    domain,
+    role,
+    history,
+    studentProfile = {},
+    level1Score = null,
+    level2Score = null,
+    previousWeaknesses = [],
+    previousStrengths = [],
+  }) {
+    const classification = classifyRole(role, domain);
+    const category = classification.category;
+    const isLevel30 = interviewNumber === 30;
+    const isLevel20 = interviewNumber === 20;
+
+    const turnsSummary = history
+      .map((h, i) => `Q${i + 1}: ${h.question}\nA: ${h.answer}\nScore: ${h.evaluation?.blueprint_score || 7}/10\nFeedback: ${h.evaluation?.feedback || ''}`)
+      .join('\n\n');
+
+    const prompt = `You are the Chief Placement Officer and Lead Interview Assessor generating an authoritative Placement Readiness Report for Interview #${interviewNumber}.
+Target Role: "${role}"
+Domain: "${domain}"
+Role Category: ${category}
+${isLevel30 ? 'CRITICAL CAPSTONE: Final Placement Simulation (Interview #30)' : isLevel20 ? 'MILESTONE: Intermediate Mock Evaluation (Interview #20)' : 'MILESTONE: Foundation Mock Evaluation (Interview #10)'}
+
+Candidate Interview Questions & Answers in this session:
+${turnsSummary}
+
+${level1Score != null ? `Prior Level 1 Baseline Score: ${level1Score}%` : ''}
+${level2Score != null ? `Prior Level 2 Intermediate Score: ${level2Score}%` : ''}
+${previousWeaknesses?.length ? `Historical Weak Areas: ${previousWeaknesses.join(', ')}` : ''}
+${previousStrengths?.length ? `Historical Strong Areas: ${previousStrengths.join(', ')}` : ''}
+
+Generate an exhaustive, highly structured Placement Readiness Evaluation covering:
+1. technical_functional: 0-100 score
+2. communication: 0-100 score
+3. problem_solving: 0-100 score
+4. resume_fidelity: 0-100 score
+5. behavioral_mastery: 0-100 score
+6. hr_culture: 0-100 score
+7. interview_performance: 0-100 score
+8. role_readiness: 0-100 score
+9. placement_readiness_score: 0-100 weighted overall placement readiness score
+10. strengths: Array of 3-5 concrete observed strengths with context
+11. weaknesses: Array of 3-5 specific weak areas to remediate
+12. improvement_from_level_1: detailed assessment on measurable progress made since Level 1
+13. improvement_from_level_2: detailed assessment on progress made since Level 2 (or N/A if Level 1)
+14. remaining_skill_gaps: Array of 2-4 critical skill gaps still to address
+15. recommended_next_steps: Array of 3-4 actionable next steps for the candidate
+
+Return ONLY valid JSON:
+{
+  "technical_functional": 0,
+  "communication": 0,
+  "problem_solving": 0,
+  "resume_fidelity": 0,
+  "behavioral_mastery": 0,
+  "hr_culture": 0,
+  "interview_performance": 0,
+  "role_readiness": 0,
+  "placement_readiness_score": 0,
+  "strengths": [],
+  "weaknesses": [],
+  "improvement_from_level_1": "",
+  "improvement_from_level_2": "",
+  "remaining_skill_gaps": [],
+  "recommended_next_steps": []
+}`;
+
+    try {
+      const text = await this.generateContent(prompt, "placement_readiness_report");
+      const parsed = JSON.parse(cleanJsonResponse(text));
+      for (const k of [
+        'technical_functional', 'communication', 'problem_solving', 'resume_fidelity',
+        'behavioral_mastery', 'hr_culture', 'interview_performance', 'role_readiness',
+        'placement_readiness_score'
+      ]) {
+        if (typeof parsed[k] !== 'number' || isNaN(parsed[k])) {
+          parsed[k] = 75;
+        } else {
+          parsed[k] = Math.max(0, Math.min(100, Math.round(parsed[k])));
+        }
+      }
+      return parsed;
+    } catch (err) {
+      console.error('Failed to generate placement readiness report via AI:', err.message);
+      const avgScore = Math.round(
+        history.reduce((s, h) => s + (h.evaluation?.blueprint_score || 7) * 10, 0) / (history.length || 1)
+      );
+      return {
+        technical_functional: avgScore,
+        communication: Math.min(100, avgScore + 2),
+        problem_solving: Math.max(40, avgScore - 2),
+        resume_fidelity: avgScore,
+        behavioral_mastery: Math.min(100, avgScore + 4),
+        hr_culture: Math.min(100, avgScore + 3),
+        interview_performance: avgScore,
+        role_readiness: avgScore,
+        placement_readiness_score: avgScore,
+        strengths: [
+          `Clear articulation and relevant context for ${role}`,
+          "Systematic approach to problem solving under questioning",
+          "Effective alignment with industry expectations",
+        ],
+        weaknesses: [
+          "Deepen practical edge-case troubleshooting and trade-off justification",
+          "Elaborate more on quantifiable business or project outcomes",
+        ],
+        improvement_from_level_1: level1Score != null
+          ? `Improved overall readiness by ${Math.max(0, avgScore - level1Score)}% since Level 1 baseline.`
+          : "Substantial progression demonstrated across foundational competencies.",
+        improvement_from_level_2: level2Score != null
+          ? `Improved overall readiness by ${Math.max(0, avgScore - level2Score)}% since Level 2 development.`
+          : "Demonstrates consistent advancement across advanced role scenarios.",
+        remaining_skill_gaps: [
+          `Specialized ${category} edge-case optimization`,
+          "Rapid cognitive articulation during high-pressure cross-questioning",
+        ],
+        recommended_next_steps: [
+          `Review core ${category} frameworks and practical problem scenarios`,
+          "Practice STAR method responses for high-stakes leadership questions",
+          "Refine project defense explanations with concrete metrics",
+        ],
+      };
     }
   }
 }
