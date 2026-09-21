@@ -469,7 +469,12 @@ app.post("/api/start", requireAuth, requireModuleAccess('ai_interview'), upload.
   }
 
   const ats = await aiService.analyzeResume(resumeText);
-  const interviewNumber = await getNextInterviewNumber(req.user._id);
+  let requestedNum = req.body.interview_number ? parseInt(req.body.interview_number) : null;
+  if (!requestedNum && req.body.interviewNumber) {
+    requestedNum = parseInt(req.body.interviewNumber);
+  }
+  const nextNum = await getNextInterviewNumber(req.user._id);
+  const interviewNumber = requestedNum || nextNum;
   const blueprint = getBlueprintByNumber(interviewNumber) || BLUEPRINTS[0];
 
   // Load previous questions to strictly prevent repetition
@@ -892,22 +897,19 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
       const domain = session.domain || '';
       const title = session.blueprint_title || ((role || 'Interview') + ' - ' + (domain || ''));
       const level = session.blueprint_level || 1;
-      await getSequelize().query(`
-        INSERT INTO journey_interviews (_id, student_id, interview_number, blueprint_title, level, status, session_id, report_id, overall_score, grade, started_at, completed_at, level_at_time, created_at, updated_at)
-        VALUES (gen_random_uuid(), :sid, :num, :title, :level, 'completed', :sessionId, :reportId, :score, :grade, :started, :completed, :level, NOW(), NOW())
-      `, {
-        replacements: {
-          sid: studentId,
-          num: nextNum,
-          title,
-          level,
-          sessionId,
-          reportId: report.report_id,
-          score: percentage,
-          grade,
-          started: session.created_at || new Date(),
-          completed: new Date(),
-        }
+      await JourneyInterview.upsert({
+        student_id: studentId,
+        interview_number: nextNum,
+        blueprint_title: title,
+        level,
+        status: 'completed',
+        session_id: sessionId,
+        report_id: report.report_id,
+        overall_score: percentage,
+        grade,
+        started_at: session.created_at || new Date(),
+        completed_at: new Date(),
+        level_at_time: level,
       });
     }
 

@@ -122,6 +122,73 @@ router.get('/interview/next', requireAuth, asyncHandler(async (req, res) => {
   const interviewNumber = Math.min(nextNum, 30);
   const blueprint = getBlueprintByNumber(interviewNumber) || BLUEPRINTS[0];
 
+  const retakeOptions = [];
+  try {
+    const completedIvs = await JourneyInterview.findAll({
+      where: {
+        student_id: studentId,
+        [Op.or]: [
+          { status: 'completed' },
+          { status: 'ended' },
+          { completed_at: { [Op.ne]: null } },
+        ],
+      },
+      order: [['interview_number', 'ASC']],
+    });
+    const ivMap = new Map();
+    for (const iv of completedIvs) {
+      if (iv.interview_number) ivMap.set(iv.interview_number, iv);
+    }
+    const maxRetake = Math.min(completedCount, accessibleTotal);
+    for (let i = 1; i <= maxRetake; i++) {
+      const bp = getBlueprintByNumber(i);
+      if (bp) {
+        const row = ivMap.get(i);
+        retakeOptions.push({
+          interview_number: bp.interview_number,
+          title: bp.title,
+          level: bp.level,
+          difficulty: bp.difficulty,
+          objective: bp.objective,
+          focus_areas: bp.focus_areas,
+          score: row ? Math.round(Number(row.overall_score || 0)) : null,
+          grade: row?.grade || '',
+        });
+      }
+    }
+    if (retakeOptions.length === 0) {
+      const pastSessions = await InterviewSession.findAll({
+        where: {
+          student_id: studentId,
+          [Op.or]: [{ status: 'ended' }, { status: 'completed' }],
+        },
+        order: [['created_at', 'DESC']],
+      });
+      const seen = new Set();
+      for (const s of pastSessions) {
+        if (s.interview_number && !seen.has(s.interview_number)) {
+          seen.add(s.interview_number);
+          const bp = getBlueprintByNumber(s.interview_number);
+          if (bp) {
+            retakeOptions.push({
+              interview_number: bp.interview_number,
+              title: bp.title,
+              level: bp.level,
+              difficulty: bp.difficulty,
+              objective: bp.objective,
+              focus_areas: bp.focus_areas,
+              score: null,
+              grade: '',
+            });
+          }
+        }
+      }
+      retakeOptions.sort((a, b) => a.interview_number - b.interview_number);
+    }
+  } catch (_e) {
+    console.log('Error generating retake options:', _e.message);
+  }
+
   res.json({
     interview_number: interviewNumber,
     title: blueprint.title,
@@ -132,7 +199,8 @@ router.get('/interview/next', requireAuth, asyncHandler(async (req, res) => {
     completed_interviews: completedCount,
     total_interviews: accessibleTotal,
     all_completed: false, // Attended interviews can be attended ANY times or multiple times!
-    can_retake: true,
+    can_retake: retakeOptions.length > 0,
+    retake_options: retakeOptions,
     is_locked: isLocked,
     access_level: accessLevel,
   });
