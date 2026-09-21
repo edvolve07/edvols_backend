@@ -834,6 +834,7 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
     student_email: session.student_email || req.user.email || "",
     interview_domain: session.domain,
     interview_role: session.role,
+    interview_number: session.interview_number || null,
     blueprint_title: session.blueprint_title || "",
     blueprint_level: session.blueprint_level || 0,
     report_id: reportId,
@@ -852,6 +853,7 @@ app.post("/api/end", requireAuth, requireModuleAccess('ai_interview'), asyncHand
       grade_label: label,
       metrics: avg,
       placement_readiness: placementReadiness,
+      interview_number: session.interview_number || null,
     },
     ats_analysis: {
       ats_score: ats.ats_score || 0,
@@ -1003,19 +1005,55 @@ app.get("/api/reports", requireAuth, requireModuleAccess('ai_interview'), asyncH
       percentage: report.overall?.percentage || 0,
       total_score: report.overall?.total_score || 0,
       max_score: report.overall?.max_score || 0,
+      interview_number: report.overall?.interview_number || null,
       created_at: report.created_at,
     })),
   });
 }));
 
-function normalizeReportForResponse(rawReport) {
+async function normalizeReportForResponse(rawReport) {
   const report = rawReport.toJSON ? rawReport.toJSON() : { ...rawReport };
+  if (!report.interview_number) {
+    report.interview_number = report.overall?.interview_number || null;
+  }
+  if (!report.interview_number && report.session_id) {
+    try {
+      const session = await InterviewSession.findOne({
+        where: { session_id: report.session_id },
+        attributes: ['interview_number', 'blueprint_title', 'blueprint_level', 'domain', 'role'],
+      });
+      if (session?.interview_number) {
+        report.interview_number = session.interview_number;
+        if (!report.blueprint_title) report.blueprint_title = session.blueprint_title;
+        if (!report.blueprint_level) report.blueprint_level = session.blueprint_level;
+        if (!report.interview_domain) report.interview_domain = session.domain;
+        if (!report.interview_role) report.interview_role = session.role;
+      } else {
+        const ji = await JourneyInterview.findOne({
+          where: { session_id: report.session_id },
+          attributes: ['interview_number', 'blueprint_title', 'level'],
+        });
+        if (ji?.interview_number) {
+          report.interview_number = ji.interview_number;
+          if (!report.blueprint_title) report.blueprint_title = ji.blueprint_title;
+          if (!report.blueprint_level) report.blueprint_level = ji.level;
+        }
+      }
+    } catch (_e) {}
+  }
+  if (!report.interview_number && report.blueprint_title) {
+    const bp = BLUEPRINTS.find(b => b.title.toLowerCase() === report.blueprint_title.toLowerCase());
+    if (bp) report.interview_number = bp.interview_number;
+  }
   if (report.overall) {
     report.overall.metrics = report.overall.metrics || {};
     if (report.overall.metrics.communication == null) {
       const flu = Number(report.overall.metrics.fluency || 7);
       const conf = Number(report.overall.metrics.confidence || 7);
       report.overall.metrics.communication = Number(((flu + conf) / 2).toFixed(1));
+    }
+    if (!report.overall.interview_number && report.interview_number) {
+      report.overall.interview_number = report.interview_number;
     }
   }
   if (Array.isArray(report.question_breakdown)) {
@@ -1050,7 +1088,7 @@ app.get("/api/report/:session_id", requireAuth, requireModuleAccess('ai_intervie
     throw new HttpError(403, "You do not have permission to access this report");
   }
 
-  const report = normalizeReportForResponse(rawReport);
+  const report = await normalizeReportForResponse(rawReport);
   res.json(report);
 }));
 
@@ -1067,7 +1105,7 @@ app.get("/api/report/:session_id/pdf", requireAuth, requireModuleAccess('ai_inte
     throw new HttpError(403, "You do not have permission to access this report");
   }
 
-  const report = normalizeReportForResponse(rawReport);
+  const report = await normalizeReportForResponse(rawReport);
   const pdf = await generatePerformancePdf(report);
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename=report_${req.params.session_id}.pdf`);

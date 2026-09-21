@@ -299,9 +299,10 @@ router.post('/interview/start', requireAuth, upload.single('resume'), asyncHandl
 
 router.post('/interview/start/:interviewNumber', requireAuth, upload.single('resume'), asyncHandler(async (req, res) => {
   const studentId = getStudentId(req);
+  const info = getStudentInfo(req);
   const interviewNumber = parseInt(req.params.interviewNumber);
   const useSaved = req.body?.use_saved === 'true' || req.body?.use_saved === true;
-  const result = await journeyService.startInterviewById(studentId, interviewNumber);
+  const result = await journeyService.startInterviewById(studentId, interviewNumber, info.name, info.email);
 
   let resumeText = '';
 
@@ -585,6 +586,7 @@ router.post('/interview/end', requireAuth, asyncHandler(async (req, res) => {
     student_id: studentId,
     interview_role: session.role || blueprint?.role || '',
     interview_domain: session.domain || blueprint?.domain || '',
+    interview_number: ivNum,
     blueprint_title: blueprint?.title || '',
     blueprint_level: blueprint?.level || 0,
     overall: {
@@ -597,6 +599,7 @@ router.post('/interview/end', requireAuth, asyncHandler(async (req, res) => {
       blueprint_avg: avgBlueprintScore,
       metrics: avgMetrics,
       placement_readiness: placementReadiness,
+      interview_number: ivNum,
     },
     question_breakdown: history.map((h, index) => {
       const commScore = h.evaluation?.communication != null

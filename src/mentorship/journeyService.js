@@ -234,7 +234,9 @@ export class JourneyService {
       let status = 'locked';
       let isNext = false;
 
-      if (isCompleted) {
+      if (existing?.status === 'active') {
+        status = 'in_progress';
+      } else if (isCompleted) {
         status = 'completed';
       } else if (!nextFound && accessible) {
         status = 'next';
@@ -305,8 +307,10 @@ export class JourneyService {
   }
 
   async startInterview(studentId, studentName, studentEmail) {
-    const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
-    if (!journey) throw new Error('No journey found. Contact your administrator to assign journey access.');
+    let journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+    if (!journey) {
+      journey = await this.getOrCreateJourney(studentId, studentName, studentEmail);
+    }
     const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
 
     if (journey.institution_id) {
@@ -386,9 +390,11 @@ export class JourneyService {
     };
   }
 
-  async startInterviewById(studentId, interviewNumber) {
-    const journey = await StudentJourney.findOne({ where: { student_id: studentId } });
-    if (!journey) throw new Error('No journey found.');
+  async startInterviewById(studentId, interviewNumber, studentName, studentEmail) {
+    let journey = await StudentJourney.findOne({ where: { student_id: studentId } });
+    if (!journey) {
+      journey = await this.getOrCreateJourney(studentId, studentName, studentEmail);
+    }
     const accessLevel = await this.getEffectiveAccessLevel(studentId, journey);
 
     if (journey.institution_id) {
@@ -407,13 +413,13 @@ export class JourneyService {
     const blueprint = getBlueprintByNumber(interviewNumber);
     if (!blueprint) throw new Error('Invalid interview number: ' + interviewNumber);
 
-    if (!isInterviewAccessible(interviewNumber, accessLevel)) {
-      throw new Error('Interview ' + interviewNumber + ' is locked. Complete previous interviews or upgrade your journey access.');
-    }
-
     const existing = await JourneyInterview.findOne({
       where: { student_id: studentId, interview_number: interviewNumber }
     });
+
+    if (!isInterviewAccessible(interviewNumber, accessLevel) && !existing) {
+      throw new Error('Interview ' + interviewNumber + ' is locked. Complete previous interviews or upgrade your journey access.');
+    }
 
     // Attended interviews can be attended ANY times or multiple times!
     const sessionId = uuidv4();
