@@ -1767,32 +1767,28 @@ async function start() {
   try {
     const { Plan } = await import('./database/index.js');
     const planCount = await Plan.count();
-    if (planCount === 0) {
       const SEED_PLANS = [
         {
           plan_key: 'basic', plan_name: 'Level 1: Foundation', duration_months: 1,
           max_level: 1, journey_access: 1, total_interviews: 10,
-          price: 199, gst_percentage: 0, status: 'active',
+          price: 299, gst_percentage: 0, status: 'active',
           features: ['Level 1: Foundation (10 Interviews)', 'HR & Behavioral Fundamentals', 'Basic Aptitude & Technical Core', 'Detailed Performance Analytics', 'Interview Replay & Feedback'],
         },
         {
           plan_key: 'advanced', plan_name: 'Level 2: Skill Development', duration_months: 3,
           max_level: 2, journey_access: 2, total_interviews: 20,
-          price: 499, gst_percentage: 0, status: 'active',
+          price: 599, gst_percentage: 0, status: 'active',
           features: ['Level 1 & 2 Access (20 Interviews)', 'Role-Specific Technical Rounds', 'System & Problem Solving Sessions', 'Intermediate Mock Evaluation (#20)', 'Programming & Aptitude Modules'],
         },
         {
           plan_key: 'professional', plan_name: 'Level 3: Placement Ready', duration_months: 6,
           max_level: 3, journey_access: 3, total_interviews: 30,
-          price: 849, gst_percentage: 0, status: 'active',
+          price: 899, gst_percentage: 0, status: 'active',
           features: ['All 3 Levels (Complete 30 Interviews)', 'Placement Simulation Round (#30)', 'Verified Placement Readiness Certificate', 'Comprehensive Analytics & AI Insights', 'Priority 1-on-1 Feedback & Support'],
         },
       ];
       for (const p of SEED_PLANS) await Plan.upsert(p);
-      console.log('Seeded 3 subscription plans');
-    } else {
-      console.log(`Plans already exist (${planCount} found)`);
-    }
+      console.log('Synced 3 subscription plans (299/599/899)');
   } catch (_err) {
     console.log('Plan seeding skipped:', _err.message);
   }

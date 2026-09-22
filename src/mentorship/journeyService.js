@@ -1411,7 +1411,7 @@ export class JourneyService {
         access_level: 1,
         interviews_total: 10,
         interviews: 10,
-        price: 199,
+        price: 299,
         features: [
           'Foundation Journey Access (Interviews 1–10)',
           '10 AI Interviews',
@@ -1428,7 +1428,7 @@ export class JourneyService {
         access_level: 2,
         interviews_total: 20,
         interviews: 20,
-        price: 499,
+        price: 599,
         features: [
           'Skill Development Access (Interviews 1–20)',
           'All Level 1 & Level 2 Features',
@@ -1445,7 +1445,7 @@ export class JourneyService {
         access_level: 3,
         interviews_total: 30,
         interviews: 30,
-        price: 849,
+        price: 899,
         features: [
           'Full Placement Ready Access (Interviews 1–30)',
           'All 30 AI Interviews Across All 3 Levels',
@@ -1517,12 +1517,12 @@ export class JourneyService {
     } catch (_e) {}
 
     const PLAN_DETAILS = {
-      starter: { name: 'Starter', price: 199, interviews: 10 },
-      career: { name: 'Career', price: 499, interviews: 20 },
-      placement_pro: { name: 'Placement Pro', price: 849, interviews: 30 },
-      basic: { name: 'Starter', price: 199, interviews: 10 },
-      advanced: { name: 'Career', price: 499, interviews: 20 },
-      professional: { name: 'Placement Pro', price: 849, interviews: 30 },
+      starter: { name: 'Starter', price: 299, interviews: 10 },
+      career: { name: 'Career', price: 599, interviews: 20 },
+      placement_pro: { name: 'Placement Pro', price: 899, interviews: 30 },
+      basic: { name: 'Starter', price: 299, interviews: 10 },
+      advanced: { name: 'Career', price: 599, interviews: 20 },
+      professional: { name: 'Placement Pro', price: 899, interviews: 30 },
     };
     const fallback = PLAN_DETAILS[planKey] || { name: planKey, price: 0, interviews: 0 };
 

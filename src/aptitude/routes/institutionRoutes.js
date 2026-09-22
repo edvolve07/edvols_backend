@@ -504,15 +504,15 @@ const INST_PRICE_KEYS = {
   level_3: 'professional_price',
 };
 const DEFAULT_INST_PRICES = {
-  starter: 199,
-  basic: 199,
-  level_1: 199,
-  career: 499,
-  advanced: 499,
-  level_2: 499,
-  placement_pro: 849,
-  professional: 849,
-  level_3: 849,
+  starter: 299,
+  basic: 299,
+  level_1: 299,
+  career: 599,
+  advanced: 599,
+  level_2: 599,
+  placement_pro: 899,
+  professional: 899,
+  level_3: 899,
 };
 const JOURNEY_LEVEL_PLAN = {
   1: 'starter',

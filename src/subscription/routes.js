@@ -17,8 +17,8 @@ const FALLBACK_PLANS = {
     name: 'Starter',
     access_level: 1,
     interviews_total: 10,
-    amount: 199,
-    total_amount: 199,
+    amount: 299,
+    total_amount: 299,
     purpose: 'Level 1: Foundation & Baseline',
     tagline: 'Diagnostic Assessment & 10 Foundational Interviews',
     popular: false,
@@ -39,8 +39,8 @@ const FALLBACK_PLANS = {
     name: 'Career',
     access_level: 2,
     interviews_total: 20,
-    amount: 499,
-    total_amount: 499,
+    amount: 599,
+    total_amount: 599,
     popular: true,
     purpose: 'Levels 1 & 2: Skill Development & Mastery',
     tagline: 'Targeted Skill Development & 20 Progressive Interviews',
@@ -61,8 +61,8 @@ const FALLBACK_PLANS = {
     name: 'Placement Pro',
     access_level: 3,
     interviews_total: 30,
-    amount: 849,
-    total_amount: 849,
+    amount: 899,
+    total_amount: 899,
     popular: false,
     purpose: 'Complete Placement Ready Simulation',
     tagline: 'Full 30-Interview Progression & Official Certification',
@@ -581,7 +581,7 @@ router.get('/invoice/:transactionId', requireAuth, requireRole('individual_stude
   });
 }));
 
-export const LEVEL_PRICES = { 1: 199, 2: 499, 3: 849 };
+export const LEVEL_PRICES = { 1: 299, 2: 599, 3: 899 };
 
 export function normalizePlanTier(planKey, amountPaid, existingAccessLevel) {
   const k = String(planKey || '').toLowerCase();
@@ -606,7 +606,7 @@ export function normalizePlanTier(planKey, amountPaid, existingAccessLevel) {
 export function calculateLevelUpgrade(currentLevel, targetLevel) {
   if (targetLevel <= currentLevel) return null;
   const currentPrice = LEVEL_PRICES[currentLevel] || 0;
-  const targetPrice = LEVEL_PRICES[targetLevel] || 849;
+  const targetPrice = LEVEL_PRICES[targetLevel] || 899;
   const upgradeCost = Math.max(0, targetPrice - currentPrice);
   const levelsCount = targetLevel - currentLevel;
   return {
